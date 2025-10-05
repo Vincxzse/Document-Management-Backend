@@ -23,7 +23,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/requests", requestRoutes);
 
 // Temporary test route for DB
-import pool from "./db.js";
+import pool from "./database/db.js";
 app.get("/api/test-db", async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT * FROM user LIMIT 5");
