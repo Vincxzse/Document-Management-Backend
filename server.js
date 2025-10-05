@@ -61,6 +61,19 @@ app.get("/api/test-db", async (req, res) => {
   }
 });
 
+// TEMPORARY FIX - Remove after running once!
+app.get("/api/fix-requests-table", async (req, res) => {
+  try {
+    await pool.query(`
+      ALTER TABLE requests 
+      MODIFY request_id INT AUTO_INCREMENT PRIMARY KEY
+    `);
+    res.json({ success: true, message: "Table fixed!" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // -------------------
 // Fallback route
 // -------------------
