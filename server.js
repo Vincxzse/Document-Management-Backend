@@ -19,8 +19,8 @@ app.use(express.json());
 app.use("/attachments", express.static(path.join(__dirname, "attachments")));
 
 // Add prefixes to routes
-app.use("/api/auth", authRoutes);
-app.use("/api/requests", requestRoutes);
+app.use(authRoutes)
+app.use(requestRoutes)
 
 // Temporary test route for DB
 import pool from "./database/db.js";
