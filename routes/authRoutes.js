@@ -1,5 +1,5 @@
 import express from 'express'
-import bcrypt from 'bcrypt'
+import bcrypt from 'bcryptjs'
 import pool from '../database/db.js'
 import validator from "validator"
 import multer from 'multer'
