@@ -20,7 +20,7 @@ const __dirname = path.dirname(__filename);
 // CORS Configuration
 // -------------------
 const allowedOrigins = [
-  "https://peachpuff-hamster-715966.hostingersite.com", // Replace with your deployed frontend URL
+  "https://https://mydocurequest.bhc1979.com/", // Replace with your deployed frontend URL
   "http://localhost:3000" // Optional: for local development
 ];
 
