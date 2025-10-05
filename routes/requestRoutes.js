@@ -404,9 +404,10 @@ router.get("/get-all-requests", async (req, res) => {
 router.get("/get-requests", async (req, res) => {
   try {
     const [fetchRequests] = await pool.query(
-      `SELECT r.*, d.name AS document_name
+      `SELECT r.*, d.name AS document_name, u.username
        FROM requests r
-       INNER JOIN document_types d ON r.document_id = d.document_id`
+       INNER JOIN document_types d ON r.document_id = d.document_id
+       INNER JOIN user u ON r.student_id = u.uid`
     )
     res.status(200).json({ fetchRequests })
   } catch (err) {
@@ -414,6 +415,7 @@ router.get("/get-requests", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch request" })
   }
 })
+
 
 // Request status update
 router.put("/request-status/:id", async (req, res) => {
