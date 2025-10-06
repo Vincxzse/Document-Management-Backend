@@ -165,67 +165,69 @@ router.post("/upload-file", upload.single("file"), async (req, res) => {
 
 
 router.post("/register/alumni-confirmation", async (req, res) => {
-    try {
-        const { answerOne, answerTwo, answerThree, email, username, studentNumber, course, role, password } = req.body;
+  try {
+    const {
+      answerOne,
+      answerTwo,
+      answerThree,
+      email,
+      username,
+      studentNumber,
+      course,
+      role,
+      password,
+    } = req.body;
 
-        // Validate required fields
-        if (!answerOne || !answerTwo || !answerThree || !email || !username || !studentNumber || !course || !role || !password) {
-            return res.status(400).json({ message: "All fields are required." });
-        }
-
-        // Normalize answers
-        const normalize = str => str.trim().toLowerCase().replace(/\s+/g, " ");
-        const a1 = normalize(answerOne);
-        const a2 = normalize(answerTwo);
-        const a3 = normalize(answerThree);
-
-        // Flexible validation for answers
-        const validA1 = [
-            "engr. sesenio s. rosales and gloria laureana s. rosales",
-            "gloria laureana s. rosales and engr. sesenio s. rosales"
-        ];
-        const validA2 = [
-            "honors the defenders of bataan in world war 2",
-            "honors the defenders of bataan in world war ii"
-        ];
-        const validA3 = ["gloria laureana s. rosales"];
-
-        if (!validA1.includes(a1)) return res.status(400).json({ message: "Invalid answer for question 1." });
-        if (!validA2.includes(a2)) return res.status(400).json({ message: "Invalid answer for question 2." });
-        if (!validA3.includes(a3)) return res.status(400).json({ message: "Invalid answer for question 3." });
-
-        // Hash password
-        const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-        // Generate verification code
-        const verifCode = Math.floor(100000 + Math.random() * 900000);
-
-        // Store verification info
-        verificationStore[email] = {
-            verifCode,
-            username,
-            studentNumber,
-            course,
-            role,
-            hashedPassword,
-            expiresAt: Date.now() + 5 * 60 * 1000 // 5 minutes
-        };
-
-        // Send verification email
-        try {
-            await sendVerificationEmail(email, verifCode);
-        } catch (emailError) {
-            console.error("Email sending failed:", emailError);
-            return res.status(500).json({ message: "Failed to send verification email. Try again later." });
-        }
-
-        return res.status(201).json({ message: "Verification code sent. Please check your email." });
-
-    } catch (error) {
-        console.error("Error in alumni confirmation:", error);
-        return res.status(500).json({ message: "Internal server error." });
+    if (!answerOne || !answerTwo || !answerThree || !email || !username || !studentNumber || !course || !role || !password) {
+      return res.status(400).json({ message: "All fields are required." });
     }
+
+    const normalize = str =>
+      str
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, " ");
+
+    const a1 = normalize(answerOne);
+    const a2 = normalize(answerTwo);
+    const a3 = normalize(answerThree);
+
+    const validA1 = [
+      "engr. sesenio s. rosales and gloria laureana s. rosales",
+      "gloria laureana s. rosales and engr. sesenio s. rosales",
+    ];
+    const validA2 = [
+      "honors the defenders of bataan in world war 2",
+      "honors the defenders of bataan in world war ii",
+    ];
+    const validA3 = ["gloria laureana s. rosales"];
+
+    if (!validA1.includes(a1)) return res.status(400).json({ message: "Incorrect answer for question 1." });
+    if (!validA2.includes(a2)) return res.status(400).json({ message: "Incorrect answer for question 2." });
+    if (!validA3.includes(a3)) return res.status(400).json({ message: "Incorrect answer for question 3." });
+
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    const verifCode = Math.floor(100000 + Math.random() * 900000);
+
+    verificationStore[email] = {
+      verifCode,
+      username,
+      studentNumber,
+      course,
+      role,
+      hashedPassword,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    };
+
+    await sendVerificationEmail(email, verifCode);
+
+    return res.status(201).json({ message: "Verification code sent. Check your email." });
+  } catch (error) {
+    console.error("Error in alumni confirmation:", error);
+    return res.status(500).json({ message: "Internal server error." });
+  }
 });
 
 router.post("/create-account-admin", async(req, res) => {
