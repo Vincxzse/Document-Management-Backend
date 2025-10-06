@@ -11,7 +11,7 @@ import pool from "./database/db.js";
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 5000; // Railway assigns a port
+const port = process.env.PORT || 5000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,18 +20,24 @@ const __dirname = path.dirname(__filename);
 // CORS Configuration
 // -------------------
 const allowedOrigins = [
-  "https://mydocurequest.bhc1979.com", // Replace with your deployed frontend URL
-  "http://localhost:3000" // Optional: for local development
+  "https://mydocurequest.bhc1979.com", // deployed frontend
+  "http://localhost:3000" // local dev
 ];
 
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
     } else {
-      callback(new Error("Not allowed by CORS"));
+      console.warn(`Blocked by CORS: ${origin}`);
+      return callback(null, false); // <-- just block it instead of throwing error
     }
-  }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  credentials: true,
 }));
 
 // -------------------
@@ -40,7 +46,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve attachments
 app.use("/attachments", express.static(path.join(__dirname, "attachments")));
 
 // -------------------
@@ -56,19 +61,6 @@ app.get("/api/test-db", async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT * FROM user LIMIT 5");
     res.json({ success: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// TEMPORARY FIX - Remove after running once!
-app.get("/api/fix-requests-table", async (req, res) => {
-  try {
-    await pool.query(`
-      ALTER TABLE requests 
-      MODIFY request_id INT AUTO_INCREMENT PRIMARY KEY
-    `);
-    res.json({ success: true, message: "Table fixed!" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
