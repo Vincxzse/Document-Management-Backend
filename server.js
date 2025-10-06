@@ -66,6 +66,15 @@ app.get("/api/test-db", async (req, res) => {
   }
 });
 
+app.get("/test-brevo", (req, res) => {
+  if (process.env.BREVO_API_KEY) {
+    res.json({ success: true, keyLength: process.env.BREVO_API_KEY.length });
+  } else {
+    res.status(500).json({ success: false, message: "BREVO_API_KEY not found" });
+  }
+});
+
+
 // -------------------
 // Fallback route
 // -------------------
