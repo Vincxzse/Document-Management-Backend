@@ -10,6 +10,9 @@ import pool from "./database/db.js";
 
 dotenv.config();
 
+// ✅ Test if Railway is passing your BREVO_API_KEY
+console.log("ENV TEST:", process.env.BREVO_API_KEY ? "FOUND ✅" : "MISSING ❌");
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -25,7 +28,7 @@ const allowedOrigins = [
 ];
 
 app.use(cors({
-  origin: function(origin, callback) {
+  origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
 
@@ -66,6 +69,9 @@ app.get("/api/test-db", async (req, res) => {
   }
 });
 
+// -------------------
+// Test route for Brevo API key
+// -------------------
 app.get("/test-brevo", (req, res) => {
   if (process.env.BREVO_API_KEY) {
     res.json({ success: true, keyLength: process.env.BREVO_API_KEY.length });
@@ -73,7 +79,6 @@ app.get("/test-brevo", (req, res) => {
     res.status(500).json({ success: false, message: "BREVO_API_KEY not found" });
   }
 });
-
 
 // -------------------
 // Fallback route
