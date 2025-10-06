@@ -10,6 +10,9 @@ import pool from "./database/db.js";
 
 dotenv.config();
 
+console.log("Railway ENV Check:", process.env.BREVO_API_KEY ? "FOUND ✅" : "MISSING ❌");
+console.log("All ENV keys:", Object.keys(process.env));
+
 // ✅ Test if Railway is passing your BREVO_API_KEY
 console.log("ENV TEST:", process.env.BREVO_API_KEY ? "FOUND ✅" : "MISSING ❌");
 
