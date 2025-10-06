@@ -4,7 +4,7 @@ import dotenv from "dotenv"
 dotenv.config()
 
 const brevoClient = new Brevo.TransactionalEmailsApi()
-brevoClient.authentications["apiKey"].apiKey = process.env.BREVO_API_KEY
+brevoClient.authentications["apiKey"].apiKey = "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"
 
 export async function sendVerificationEmail(toEmail, code) {
     const sendSmtpEmail = new Brevo.SendSmtpEmail()
