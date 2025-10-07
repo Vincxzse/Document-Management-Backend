@@ -431,18 +431,29 @@ router.put("/request-status/:id", async (req, res) => {
   }
 })
 
-// Requests with docs (detailed)
+// Requests with docs
 router.get("/api/requests-with-docs", async (req, res) => {
   try {
-    const [rows] = await pool.query(`
+    const { startDate, endDate } = req.query
+
+    let query = `
       SELECT r.request_id, r.student_id, r.document_id, r.payment, r.status,
              r.release_date, r.submission_date, r.reason, r.payment_attachment,
              r.reference_no, r.amount, r.rejection_reason, r.request_rejection,
              d.name AS document_name, d.description, d.processing_time, d.fee
       FROM requests r
       LEFT JOIN document_types d ON r.document_id = d.document_id
-      ORDER BY r.submission_date DESC
-    `)
+    `
+    const params = []
+
+    if (startDate && endDate) {
+      query += ` WHERE DATE(r.submission_date) BETWEEN ? AND ?`
+      params.push(startDate, endDate)
+    }
+
+    query += ` ORDER BY r.submission_date DESC`
+
+    const [rows] = await pool.query(query, params)
     res.json(rows)
   } catch (err) {
     console.error(err)

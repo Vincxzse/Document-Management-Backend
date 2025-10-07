@@ -179,5 +179,10 @@
 -- COMMIT;
 
 
-INSERT INTO `user` (`uid`, `username`, `email`, `password`, `course`, `role`, `department`, `student_number`) VALUES
-(101, 'Super Admin', 'superadmin@gmail.com', '$2b$10$blZWGYjVRS8vHJ6AqNMqQuwIdrnENrNz57sZcEoo1bECXwg530nsu', 'bachelor of science in information technology', 'super admin', NULL, NULL)
+-- INSERT INTO `user` (`uid`, `username`, `email`, `password`, `course`, `role`, `department`, `student_number`) VALUES
+-- (101, 'Super Admin', 'superadmin@gmail.com', '$2b$10$blZWGYjVRS8vHJ6AqNMqQuwIdrnENrNz57sZcEoo1bECXwg530nsu', 'bachelor of science in information technology', 'super admin', NULL, NULL)
+-- ALTER TABLE user 
+-- MODIFY uid INT NOT NULL AUTO_INCREMENT PRIMARY KEY;
+
+-- ALTER TABLE user MODIFY uid INT AUTO_INCREMENT PRIMARY KEY;
+-- ALTER TABLE clearances MODIFY clearance_id INT AUTO_INCREMENT PRIMARY KEY;
