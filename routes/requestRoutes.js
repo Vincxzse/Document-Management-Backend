@@ -403,18 +403,39 @@ router.get("/get-all-requests", async (req, res) => {
 // Get requests (joined)
 router.get("/get-requests", async (req, res) => {
   try {
-    const [fetchRequests] = await pool.query(
-      `SELECT r.*, d.name AS document_name, u.username
-       FROM requests r
-       INNER JOIN document_types d ON r.document_id = d.document_id
-       INNER JOIN user u ON r.student_id = u.uid`
-    )
-    res.status(200).json({ fetchRequests })
+    const [fetchRequests] = await pool.query(`
+      SELECT 
+        r.request_id,
+        r.student_id,
+        r.document_id,
+        r.status AS request_status,
+        r.payment,
+        DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
+        DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
+        d.name AS document_name,
+        u.username,
+        u.course,
+        u.email,
+        c.registrar_status,
+        c.guidance_status,
+        c.engineering_status,
+        c.criminology_status,
+        c.mis_status,
+        c.library_status,
+        c.cashier_status
+      FROM requests r
+      INNER JOIN document_types d ON r.document_id = d.document_id
+      INNER JOIN user u ON r.student_id = u.uid
+      LEFT JOIN request_clearances c ON r.request_id = c.request_id
+      ORDER BY r.submission_date DESC
+    `);
+
+    res.status(200).json({ fetchRequests });
   } catch (err) {
-    console.error("Error: ", err.message)
-    res.status(500).json({ error: "Failed to fetch request" })
+    console.error("Error fetching requests:", err);
+    res.status(500).json({ error: "Failed to fetch requests" });
   }
-})
+});
 
 
 // Request status update
