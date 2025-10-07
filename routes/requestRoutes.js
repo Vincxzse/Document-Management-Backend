@@ -408,7 +408,7 @@ router.get("/get-requests", async (req, res) => {
         r.request_id,
         r.student_id,
         r.document_id,
-        r.status AS request_status,
+        r.status,
         r.payment,
         DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
         DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
@@ -423,22 +423,19 @@ router.get("/get-requests", async (req, res) => {
         c.mis_status,
         c.library_status,
         c.cashier_status
-      FROM requests AS r
-      INNER JOIN document_types AS d 
-        ON r.document_id = d.document_id
-      INNER JOIN \`user\` AS u 
-        ON r.student_id = u.uid
-      LEFT JOIN request_clearances AS c 
-        ON r.request_id = c.request_id
+      FROM requests r
+      INNER JOIN document_types d ON r.document_id = d.document_id
+      INNER JOIN user u ON r.student_id = u.uid
+      LEFT JOIN request_clearances c ON r.request_id = c.request_id
       ORDER BY r.submission_date DESC
-    `);
+    `)
 
-    res.status(200).json({ success: true, fetchRequests });
+    res.status(200).json({ fetchRequests })
   } catch (err) {
-    console.error("Error fetching requests:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch requests" });
+    console.error("Error fetching requests:", err)
+    res.status(500).json({ error: "Failed to fetch requests" })
   }
-});
+})
 
 
 
