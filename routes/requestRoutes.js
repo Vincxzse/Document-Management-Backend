@@ -4,7 +4,87 @@ import bcrypt from 'bcryptjs'
 
 const router = express.Router()
 
-// Reject request
+/**
+ * Helper: update clearance row for a particular department.
+ * Validates department, updates status/reason/timestamp, then updates requests.status if needed.
+ */
+async function updateClearanceRow(requestId, department, status, reason) {
+  const validDepartments = [
+    "registrar", "guidance", "engineering",
+    "criminology", "mis", "library", "cashier"
+  ];
+  if (!validDepartments.includes(department)) {
+    const err = new Error("Invalid department");
+    err.code = "INVALID_DEPARTMENT";
+    throw err;
+  }
+
+  const approvedAtField = `${department}_approved_at`;
+  const statusField = `${department}_status`;
+  const reasonField = `${department}_reason`;
+
+  let query, params;
+  if (status === "approved") {
+    query = `UPDATE request_clearances
+             SET ${statusField} = ?, ${reasonField} = NULL, ${approvedAtField} = NOW()
+             WHERE request_id = ?`;
+    params = [status, requestId];
+  } else if (status === "rejected" && reason) {
+    query = `UPDATE request_clearances
+             SET ${statusField} = ?, ${reasonField} = ?, ${approvedAtField} = NULL
+             WHERE request_id = ?`;
+    params = [status, reason, requestId];
+  } else {
+    query = `UPDATE request_clearances
+             SET ${statusField} = ?, ${approvedAtField} = NULL
+             WHERE request_id = ?`;
+    params = [status, requestId];
+  }
+
+  const [result] = await pool.query(query, params);
+  if (result.affectedRows === 0) {
+    // If there's no clearance row yet, create it then retry the update
+    const [exists] = await pool.query("SELECT 1 FROM request_clearances WHERE request_id = ?", [requestId]);
+    if (exists.length === 0) {
+      await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId]);
+      const [retry] = await pool.query(query, params);
+      if (retry.affectedRows === 0) {
+        throw new Error("Failed to update clearance after creating row");
+      }
+    } else {
+      throw new Error("Failed to update clearance");
+    }
+  }
+
+  // After updating, check overall clearance statuses to set request.status
+  const [clearanceStatusRows] = await pool.query(
+    `SELECT registrar_status, guidance_status, engineering_status,
+            criminology_status, mis_status, library_status, cashier_status
+     FROM request_clearances
+     WHERE request_id = ?`,
+    [requestId]
+  );
+
+  if (clearanceStatusRows.length > 0) {
+    const statuses = Object.values(clearanceStatusRows[0]).map(s => (s || "").toLowerCase());
+    const anyRejected = statuses.some(s => s === 'rejected');
+    const allApproved = statuses.every(s => s === 'approved');
+
+    if (anyRejected) {
+      await pool.query("UPDATE requests SET status = 'rejected' WHERE request_id = ?", [requestId]);
+    } else if (allApproved) {
+      await pool.query("UPDATE requests SET status = 'approved' WHERE request_id = ?", [requestId]);
+    } else {
+      // optional: keep as is (pending/in-progress)
+    }
+  }
+
+  return true;
+}
+
+/* ==========================
+   Reject request (mark request rejected + reason)
+   ========================== */
 router.post('/reject-req/:request_id', async (req, res) => {
   const { request_id } = req.params
   const { reason } = req.body
@@ -22,7 +102,10 @@ router.post('/reject-req/:request_id', async (req, res) => {
   }
 })
 
-// Create request
+/* ==========================
+   Create request
+   - Inserts into requests, then auto-creates request_clearances record
+   ========================== */
 router.post("/create-request", async (req, res) => {
   try {
     const { student_id, document_id, request_reason } = req.body
@@ -79,7 +162,9 @@ router.post("/create-request", async (req, res) => {
   }
 })
 
-// Approve payment
+/* ==========================
+   Approve payment
+   ========================== */
 router.put("/approve-payment/:id", async (req, res) => {
   const { id } = req.params
   try {
@@ -91,7 +176,9 @@ router.put("/approve-payment/:id", async (req, res) => {
   }
 })
 
-// Reject payment
+/* ==========================
+   Reject payment
+   ========================== */
 router.put("/reject-payment/:id", async (req, res) => {
   const { id } = req.params
   const { reason } = req.body
@@ -107,7 +194,9 @@ router.put("/reject-payment/:id", async (req, res) => {
   }
 })
 
-// Get all clearances (joined with user info)
+/* ==========================
+   Get all clearances (joined with user info)
+   ========================== */
 router.get("/api/clearances", async (req, res) => {
   try {
     const [rows] = await pool.query(`
@@ -122,7 +211,7 @@ router.get("/api/clearances", async (req, res) => {
         c.library_status, c.library_reason,
         c.cashier_status, c.cashier_reason
       FROM requests r
-      JOIN user u ON r.student_id = u.uid
+      JOIN \`user\` u ON r.student_id = u.uid
       LEFT JOIN request_clearances c ON r.request_id = c.request_id
       ORDER BY r.submission_date DESC
     `)
@@ -133,6 +222,9 @@ router.get("/api/clearances", async (req, res) => {
   }
 })
 
+/* ==========================
+   Get a single clearance (detailed) — merges request + clearance + student info
+   ========================== */
 router.get("/api/clearances/:requestId", async (req, res) => {
   const { requestId } = req.params;
   
@@ -162,7 +254,7 @@ router.get("/api/clearances/:requestId", async (req, res) => {
         u.student_number
        FROM requests r
        LEFT JOIN document_types d ON r.document_id = d.document_id
-       LEFT JOIN user u ON r.student_id = u.uid
+       LEFT JOIN \`user\` u ON r.student_id = u.uid
        WHERE r.request_id = ?`,
       [requestId]
     );
@@ -190,6 +282,7 @@ router.get("/api/clearances/:requestId", async (req, res) => {
         "INSERT INTO request_clearances (request_id) VALUES (?)",
         [requestId]
       );
+      // Provide default values so frontend doesn't break
       clearanceData = {
         registrar_status: 'pending',
         guidance_status: 'pending',
@@ -201,10 +294,11 @@ router.get("/api/clearances/:requestId", async (req, res) => {
       };
     }
 
-    // Merge everything together and rename status to request_status for clarity
+    // Merge everything together and keep both status keys for compatibility:
+    // - `status` (original request.status) and `request_status` for any code that expects that alias.
     const response = {
       ...request,
-      request_status: request.status, // Rename for frontend
+      request_status: request.status,
       ...clearanceData
     };
 
@@ -222,7 +316,10 @@ router.get("/api/clearances/:requestId", async (req, res) => {
   }
 });
 
-// Update clearance for a department
+/* ==========================
+   Update clearance for a department (main route)
+   - Expects :department in path and { status, reason } in body
+   ========================== */
 router.put("/api/clearances/:requestId/:department", async (req, res) => {
   const { requestId, department } = req.params
   const { status, reason } = req.body
@@ -237,7 +334,7 @@ router.put("/api/clearances/:requestId/:department", async (req, res) => {
   }
 
   try {
-    // Check if clearance record exists
+    // Ensure a clearance row exists
     const [existing] = await pool.query(
       "SELECT * FROM request_clearances WHERE request_id = ?",
       [requestId]
@@ -251,66 +348,8 @@ router.put("/api/clearances/:requestId/:department", async (req, res) => {
       console.log(`Created new clearance record for request ${requestId}`)
     }
 
-    // Build update query with approval date
-    let query, params
-
-    if (status === "approved") {
-      // Set approved status and timestamp
-      query = `UPDATE request_clearances 
-               SET ${department}_status = ?, 
-                   ${department}_reason = NULL,
-                   ${department}_approved_at = NOW()
-               WHERE request_id = ?`
-      params = [status, requestId]
-    } else if (status === "rejected" && reason) {
-      // Set rejected status with reason, clear approval date
-      query = `UPDATE request_clearances 
-               SET ${department}_status = ?, 
-                   ${department}_reason = ?,
-                   ${department}_approved_at = NULL
-               WHERE request_id = ?`
-      params = [status, reason, requestId]
-    } else {
-      query = `UPDATE request_clearances 
-               SET ${department}_status = ?,
-                   ${department}_approved_at = NULL
-               WHERE request_id = ?`
-      params = [status, requestId]
-    }
-
-    const [result] = await pool.query(query, params)
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Failed to update clearance" })
-    }
-
-    // Check if all departments are cleared
-    const [clearanceStatus] = await pool.query(
-      `SELECT 
-        registrar_status, guidance_status, engineering_status,
-        criminology_status, mis_status, library_status, cashier_status
-      FROM request_clearances 
-      WHERE request_id = ?`,
-      [requestId]
-    )
-
-    if (clearanceStatus.length > 0) {
-      const statuses = Object.values(clearanceStatus[0])
-      const anyRejected = statuses.some(s => s === 'rejected')
-      const allApproved = statuses.every(s => s === 'approved')
-
-      if (anyRejected) {
-        await pool.query(
-          "UPDATE requests SET status = 'rejected' WHERE request_id = ?",
-          [requestId]
-        )
-      } else if (allApproved) {
-        await pool.query(
-          "UPDATE requests SET status = 'approved' WHERE request_id = ?",
-          [requestId]
-        )
-      }
-    }
+    // Use helper to update and set timestamps appropriately
+    await updateClearanceRow(requestId, department, status, reason)
 
     res.json({ 
       message: `${department} clearance updated successfully`, 
@@ -318,17 +357,56 @@ router.put("/api/clearances/:requestId/:department", async (req, res) => {
       reason: reason || null 
     })
   } catch (err) {
+    if (err.code === "INVALID_DEPARTMENT") {
+      return res.status(400).json({ message: "Invalid department" })
+    }
     console.error("Error updating clearance:", err)
     res.status(500).json({ error: "Internal server error", details: err.message })
   }
 })
 
-// Specific cashier route (deprecated but fixed to new table)
+/* ==========================
+   Bridge routes: approve/reject helpers (convenience for some frontends)
+   These call the same helper above for consistency.
+   Request body must contain { department } or { department, reason }
+   ========================== */
+router.put("/api/clearances/:requestId/approve", async (req, res) => {
+  const { requestId } = req.params;
+  const { department } = req.body;
+  try {
+    if (!department) return res.status(400).json({ message: "Missing department in body" });
+    await updateClearanceRow(requestId, department, "approved", null);
+    res.json({ message: `${department} approved successfully` });
+  } catch (err) {
+    console.error("Approve error:", err);
+    res.status(500).json({ error: "Failed to approve", details: err.message });
+  }
+});
+
+router.put("/api/clearances/:requestId/reject", async (req, res) => {
+  const { requestId } = req.params;
+  const { department, reason } = req.body;
+  try {
+    if (!department) return res.status(400).json({ message: "Missing department in body" });
+    if (!reason) return res.status(400).json({ message: "Missing reason for rejection" });
+    await updateClearanceRow(requestId, department, "rejected", reason);
+    res.json({ message: `${department} rejected successfully` });
+  } catch (err) {
+    console.error("Reject error:", err);
+    res.status(500).json({ error: "Failed to reject", details: err.message });
+  }
+});
+
+/* ==========================
+   Deprecated/compat cashier route (kept for compatibility)
+   If you prefer, you may remove this — the generic routes above handle cashier too.
+   ========================== */
 router.put("/api/clearances/:userId/cashier", async (req, res) => {
   const { userId } = req.params
   const { status } = req.body
 
   try {
+    // Update as cashier on request_clearances (userId here is treated as request_id historically)
     const [result] = await pool.query(
       `UPDATE request_clearances SET cashier_status = ? WHERE request_id = ?`,
       [status, userId]
@@ -338,6 +416,9 @@ router.put("/api/clearances/:userId/cashier", async (req, res) => {
       return res.status(404).json({ message: "Clearance not found" })
     }
 
+    // After update, re-run overall status checks (to keep requests.status in sync)
+    await updateClearanceRow(userId, 'cashier', status, null)
+
     res.json({ message: "Cashier clearance updated" })
   } catch (err) {
     console.error("Error updating clearance:", err.message)
@@ -345,9 +426,9 @@ router.put("/api/clearances/:userId/cashier", async (req, res) => {
   }
 })
 
-// ... (rest of your requests & users routes unchanged)
-
-// Get requests for a student
+/* ==========================
+   Get requests for a student
+   ========================== */
 router.get("/requests/:student_id", async (req, res) => {
   try {
     const { student_id } = req.params
@@ -379,7 +460,9 @@ router.get("/requests/:student_id", async (req, res) => {
   }
 })
 
-// Get all requests (admin)
+/* ==========================
+   Get all requests (admin)
+   ========================== */
 router.get("/get-all-requests", async (req, res) => {
   try {
     const [requests] = await pool.query(
@@ -400,7 +483,10 @@ router.get("/get-all-requests", async (req, res) => {
   }
 })
 
-// Get requests (joined)
+/* ==========================
+   Get requests (joined) — this was causing your frontend change; kept original field names
+   so frontend doesn't break (status remains `status`, document_name, username present)
+   ========================== */
 router.get("/get-requests", async (req, res) => {
   try {
     const [fetchRequests] = await pool.query(`
@@ -425,7 +511,7 @@ router.get("/get-requests", async (req, res) => {
         c.cashier_status
       FROM requests r
       INNER JOIN document_types d ON r.document_id = d.document_id
-      INNER JOIN user u ON r.student_id = u.uid
+      INNER JOIN \`user\` u ON r.student_id = u.uid
       LEFT JOIN request_clearances c ON r.request_id = c.request_id
       ORDER BY r.submission_date DESC
     `)
@@ -437,9 +523,9 @@ router.get("/get-requests", async (req, res) => {
   }
 })
 
-
-
-// Request status update
+/* ==========================
+   Request status update
+   ========================== */
 router.put("/request-status/:id", async (req, res) => {
   const { id } = req.params
   const { status } = req.body
@@ -453,7 +539,9 @@ router.put("/request-status/:id", async (req, res) => {
   }
 })
 
-// Requests with docs
+/* ==========================
+   Requests with docs (search by date optional)
+   ========================== */
 router.get("/api/requests-with-docs", async (req, res) => {
   try {
     const { startDate, endDate } = req.query
@@ -483,10 +571,12 @@ router.get("/api/requests-with-docs", async (req, res) => {
   }
 })
 
-// Users: get all
+/* ==========================
+   Users: get all
+   ========================== */
 router.get("/get-all-users", async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM user")
+    const [rows] = await pool.query("SELECT * FROM `user`")
     res.json(rows)
   } catch (err) {
     console.error("Error: ", err)
@@ -494,7 +584,9 @@ router.get("/get-all-users", async (req, res) => {
   }
 })
 
-// Update user
+/* ==========================
+   Update user
+   ========================== */
 router.put("/update-user", async (req, res) => {
   try {
     const { userID, username, email, role } = req.body
@@ -518,7 +610,9 @@ router.put("/update-user", async (req, res) => {
   }
 })
 
-// Delete user
+/* ==========================
+   Delete user
+   ========================== */
 router.delete("/delete-user", async (req, res) => {
   try {
     const { userID, password, currentUserID } = req.body
@@ -541,11 +635,13 @@ router.delete("/delete-user", async (req, res) => {
   }
 })
 
-// Get user by id
+/* ==========================
+   Get user by id
+   ========================== */
 router.get("/api/users/:id", async (req, res) => {
   const { id } = req.params
   try {
-    const [rows] = await pool.query("SELECT * FROM user WHERE uid = ?", [id])
+    const [rows] = await pool.query("SELECT * FROM `user` WHERE uid = ?", [id])
     if (rows.length === 0) return res.status(404).json({ message: "User not found" })
     res.json(rows[0])
   } catch (err) {
