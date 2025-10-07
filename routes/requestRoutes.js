@@ -423,19 +423,23 @@ router.get("/get-requests", async (req, res) => {
         c.mis_status,
         c.library_status,
         c.cashier_status
-      FROM requests r
-      INNER JOIN document_types d ON r.document_id = d.document_id
-      INNER JOIN user u ON r.student_id = u.uid
-      LEFT JOIN request_clearances c ON r.request_id = c.request_id
+      FROM requests AS r
+      INNER JOIN document_types AS d 
+        ON r.document_id = d.document_id
+      INNER JOIN \`user\` AS u 
+        ON r.student_id = u.uid
+      LEFT JOIN request_clearances AS c 
+        ON r.request_id = c.request_id
       ORDER BY r.submission_date DESC
     `);
 
-    res.status(200).json({ fetchRequests });
+    res.status(200).json({ success: true, fetchRequests });
   } catch (err) {
     console.error("Error fetching requests:", err);
-    res.status(500).json({ error: "Failed to fetch requests" });
+    res.status(500).json({ success: false, error: "Failed to fetch requests" });
   }
 });
+
 
 
 // Request status update
