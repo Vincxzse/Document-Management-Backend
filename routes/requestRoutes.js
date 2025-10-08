@@ -496,6 +496,7 @@ router.get("/get-requests", async (req, res) => {
         r.document_id,
         r.status,
         r.payment,
+        r.rejection_reason,
         DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
         DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
         d.name AS document_name,
