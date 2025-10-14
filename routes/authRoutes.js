@@ -178,7 +178,7 @@ router.post("/register/alumni-confirmation", async (req, res) => {
       password,
     } = req.body;
 
-    if (!answerOne || !answerTwo || !answerThree || !email || !username || !studentNumber || !course || !role || !password) {
+    if (!answerOne || !answerTwo || !answerThree || !email || !username || !course || !role || !password) {
       return res.status(400).json({ message: "All fields are required." });
     }
 

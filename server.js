@@ -27,7 +27,7 @@ const __dirname = path.dirname(__filename);
 // -------------------
 const allowedOrigins = [
   "https://mydocurequest.bhc1979.com", // deployed frontend
-  "http://localhost:3000" // local dev
+  "http://localhost:5173" // local dev
 ];
 
 app.use(cors({
