@@ -809,4 +809,474 @@ router.post("/checkout", async (req, res) => {
   }
 })
 
+
+// ============================================================================
+// 🎓 STUDENT CLEARANCE ROUTES (FIXED!)
+// ============================================================================
+
+/**
+ * ⏰ Helper: Check if clearance has expired
+ */
+function isClearanceExpired(clearanceExpiry) {
+  // If no expiry is set, clearance is NOT expired (it's still valid)
+  if (!clearanceExpiry) return false;
+  
+  const expiry = new Date(clearanceExpiry);
+  const now = new Date();
+  
+  // If expiry is invalid, consider it not expired
+  if (isNaN(expiry.getTime())) return false;
+  
+  // Check if current time is AFTER expiry time
+  return now > expiry;
+}
+
+/**
+ * Helper: Check if clearance is fully valid
+ */
+function isClearanceValid(clearance) {
+  const allApproved = [
+    clearance.registrar_status,
+    clearance.guidance_status,
+    clearance.mis_status,
+    clearance.library_status,
+    clearance.cashier_status,
+  ].every((s) => s === "approved");
+
+  return allApproved;
+}
+
+/**
+ * GET /api/student-clearances
+ * Get all students with clearance status
+ */
+router.get("/api/student-clearances", async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        u.uid, u.username, u.email, u.course, u.role,
+        sc.registrar_status, sc.guidance_status, sc.mis_status, 
+        sc.library_status, sc.cashier_status,
+        sc.registrar_reason, sc.guidance_reason, sc.mis_reason,
+        sc.library_reason, sc.cashier_reason,
+        sc.registrar_approved_at, sc.guidance_approved_at, sc.mis_approved_at,
+        sc.library_approved_at, sc.cashier_approved_at,
+        sc.last_cleared, sc.clearance_expiry
+      FROM \`user\` u
+      LEFT JOIN student_clearance sc ON u.uid = sc.student_id
+      WHERE u.role IN ('student', 'alumni')
+      ORDER BY u.username ASC
+    `;
+
+    const [students] = await pool.query(query);
+
+    // Add computed validity fields
+    const studentsWithValidity = students.map((student) => ({
+      ...student,
+      is_expired: isClearanceExpired(student.clearance_expiry),
+      is_valid: student.registrar_status
+        ? isClearanceValid(student)
+        : false,
+    }));
+
+    res.json({ students: studentsWithValidity });
+  } catch (error) {
+    console.error("Error fetching student clearances:", error);
+    res.status(500).json({ message: "Failed to fetch student clearances" });
+  }
+});
+
+/**
+ * GET /api/student-clearances/:studentId
+ * Get specific student's clearance
+ */
+router.get("/api/student-clearances/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    console.log(`Fetching clearance for student ${studentId}`);
+
+    const query = `
+      SELECT 
+        u.uid, u.username, u.email, u.course, u.role,
+        sc.registrar_status, sc.guidance_status, sc.mis_status, 
+        sc.library_status, sc.cashier_status,
+        sc.registrar_reason, sc.guidance_reason, sc.mis_reason,
+        sc.library_reason, sc.cashier_reason,
+        sc.registrar_approved_at, sc.guidance_approved_at, sc.mis_approved_at,
+        sc.library_approved_at, sc.cashier_approved_at,
+        sc.last_cleared, sc.clearance_expiry
+      FROM \`user\` u
+      LEFT JOIN student_clearance sc ON u.uid = sc.student_id
+      WHERE u.uid = ?
+    `;
+
+    const [results] = await pool.query(query, [studentId]);
+
+    if (results.length === 0) {
+      console.log(`Student ${studentId} not found`);
+      return res
+        .status(404)
+        .json({ message: "Student not found" });
+    }
+
+    // If no clearance record exists, create one
+    if (!results[0].registrar_status) {
+      console.log(`Creating new clearance record for student ${studentId}`);
+
+      await pool.query(
+        "INSERT INTO student_clearance (student_id) VALUES (?)",
+        [studentId]
+      );
+
+      const [newResults] = await pool.query(query, [studentId]);
+      return res.json({
+        ...newResults[0],
+        is_expired: true,
+        is_valid: false,
+      });
+    }
+
+    // Check if expired and reset if needed
+    const clearance = results[0];
+    if (isClearanceExpired(clearance.clearance_expiry)) {
+      console.log(
+        `Clearance expired for student ${studentId}, resetting...`
+      );
+
+      await pool.query(
+        `
+        UPDATE student_clearance 
+        SET registrar_status = 'pending',
+            guidance_status = 'pending',
+            mis_status = 'pending',
+            library_status = 'pending',
+            cashier_status = 'pending',
+            registrar_reason = NULL,
+            guidance_reason = NULL,
+            mis_reason = NULL,
+            library_reason = NULL,
+            cashier_reason = NULL,
+            registrar_approved_at = NULL,
+            guidance_approved_at = NULL,
+            mis_approved_at = NULL,
+            library_approved_at = NULL,
+            cashier_approved_at = NULL,
+            clearance_expiry = NULL
+        WHERE student_id = ?
+      `,
+        [studentId]
+      );
+
+      const [resetResults] = await pool.query(query, [studentId]);
+      return res.json({
+        ...resetResults[0],
+        is_expired: true,
+        is_valid: false,
+        was_reset: true,
+      });
+    }
+
+    console.log(`Successfully fetched clearance for student ${studentId}`);
+
+    res.json({
+      ...clearance,
+      is_expired: false,
+      is_valid: isClearanceValid(clearance),
+    });
+  } catch (error) {
+    console.error("Error fetching student clearance:", error);
+    res
+      .status(500)
+      .json({
+        message: "Failed to fetch student clearance",
+        details: error.message,
+      });
+  }
+});
+
+/**
+ * PUT /api/student-clearances/:studentId/:department
+ * Update department clearance status
+ */
+router.put(
+  "/api/student-clearances/:studentId/:department",
+  async (req, res) => {
+    try {
+      const { studentId, department } = req.params;
+      const { status, reason } = req.body;
+
+      console.log(`Updating clearance - Student: ${studentId}, Dept: ${department}, Status: ${status}`);
+
+      // Validate department
+      const validDepts = [
+        "registrar",
+        "guidance",
+        "mis",
+        "library",
+        "cashier",
+      ];
+      if (!validDepts.includes(department)) {
+        return res.status(400).json({ message: "Invalid department" });
+      }
+
+      // Validate status
+      if (!["approved", "rejected", "pending"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      // Check if clearance record exists
+      const checkQuery =
+        "SELECT * FROM student_clearance WHERE student_id = ?";
+      const [existing] = await pool.query(checkQuery, [studentId]);
+
+      if (existing.length === 0) {
+        console.log(`Creating clearance record for student ${studentId}`);
+        await pool.query(
+          "INSERT INTO student_clearance (student_id) VALUES (?)",
+          [studentId]
+        );
+      }
+
+      // Fetch the latest record after ensuring it exists
+      const [updatedRecord] = await pool.query(checkQuery, [studentId]);
+      const clearance = updatedRecord[0];
+
+      // Reset expired clearance if needed
+      if (isClearanceExpired(clearance.clearance_expiry)) {
+        console.log(
+          `Resetting expired clearance for student ${studentId}`
+        );
+        await pool.query(
+          `
+          UPDATE student_clearance 
+          SET registrar_status = 'pending',
+              guidance_status = 'pending',
+              mis_status = 'pending',
+              library_status = 'pending',
+              cashier_status = 'pending',
+              registrar_reason = NULL,
+              guidance_reason = NULL,
+              mis_reason = NULL,
+              library_reason = NULL,
+              cashier_reason = NULL,
+              registrar_approved_at = NULL,
+              guidance_approved_at = NULL,
+              mis_approved_at = NULL,
+              library_approved_at = NULL,
+              cashier_approved_at = NULL,
+              clearance_expiry = NULL
+          WHERE student_id = ?
+        `,
+          [studentId]
+        );
+      }
+
+      // Apply the department update
+      const statusField = `${department}_status`;
+      const reasonField = `${department}_reason`;
+      const dateField = `${department}_approved_at`;
+
+      let updateQuery, params;
+
+      if (status === "approved") {
+        updateQuery = `
+          UPDATE student_clearance 
+          SET ${statusField} = ?, 
+              ${reasonField} = NULL,
+              ${dateField} = NOW()
+          WHERE student_id = ?
+        `;
+        params = [status, studentId];
+      } else if (status === "rejected") {
+        updateQuery = `
+          UPDATE student_clearance 
+          SET ${statusField} = ?, 
+              ${reasonField} = ?,
+              ${dateField} = NULL
+          WHERE student_id = ?
+        `;
+        params = [status, reason || null, studentId];
+      } else {
+        updateQuery = `
+          UPDATE student_clearance 
+          SET ${statusField} = ?, 
+              ${reasonField} = NULL,
+              ${dateField} = NULL
+          WHERE student_id = ?
+        `;
+        params = [status, studentId];
+      }
+
+      const [updateResult] = await pool.query(updateQuery, params);
+
+      if (updateResult.affectedRows === 0) {
+        return res
+          .status(500)
+          .json({ message: "Failed to update clearance" });
+      }
+
+      // Check if all departments are approved
+      const [final] = await pool.query(checkQuery, [studentId]);
+      const finalClearance = final[0];
+
+      const allApproved = validDepts.every(
+        (d) => finalClearance[`${d}_status`] === "approved"
+      );
+
+      if (allApproved) {
+        console.log(
+          `All departments approved! Setting expiry for student ${studentId} to 6 months from now`
+        );
+        
+        // Set expiry to 6 months from today (not from the current time)
+        const expiryDate = new Date();
+        expiryDate.setMonth(expiryDate.getMonth() + 6);
+        
+        await pool.query(
+          `
+          UPDATE student_clearance 
+          SET last_cleared = NOW(),
+              clearance_expiry = ?
+          WHERE student_id = ?
+        `,
+          [expiryDate, studentId]
+        );
+        
+        console.log(`Expiry date set to: ${expiryDate.toISOString()}`);
+      }
+
+      console.log(
+        `Successfully updated ${department} clearance for student ${studentId}`
+      );
+      res.json({ message: "Clearance updated successfully" });
+    } catch (error) {
+      console.error("Error updating clearance:", error);
+      res
+        .status(500)
+        .json({
+          message: "Failed to update clearance",
+          details: error.message,
+        });
+    }
+  }
+);
+
+/**
+ * POST /api/student-clearances/:studentId/reset
+ * Manual clearance reset (for admins)
+ */
+router.post("/api/student-clearances/:studentId/reset", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    console.log(`Manually resetting clearance for student ${studentId}`);
+
+    await pool.query(
+      `
+      UPDATE student_clearance 
+      SET registrar_status = 'pending',
+          guidance_status = 'pending',
+          mis_status = 'pending',
+          library_status = 'pending',
+          cashier_status = 'pending',
+          registrar_reason = NULL,
+          guidance_reason = NULL,
+          mis_reason = NULL,
+          library_reason = NULL,
+          cashier_reason = NULL,
+          registrar_approved_at = NULL,
+          guidance_approved_at = NULL,
+          mis_approved_at = NULL,
+          library_approved_at = NULL,
+          cashier_approved_at = NULL,
+          clearance_expiry = NULL
+      WHERE student_id = ?
+    `,
+      [studentId]
+    );
+
+    console.log(`Successfully reset clearance for student ${studentId}`);
+    res.json({ message: "Clearance reset successfully" });
+  } catch (error) {
+    console.error("Error resetting clearance:", error);
+    res
+      .status(500)
+      .json({
+        message: "Failed to reset clearance",
+        details: error.message,
+      });
+  }
+});
+
+/**
+ * GET /api/student-clearances/:studentId/can-request
+ * Check if student can request documents
+ */
+router.get(
+  "/api/student-clearances/:studentId/can-request",
+  async (req, res) => {
+    try {
+      const { studentId } = req.params;
+
+      const [results] = await pool.query(
+        "SELECT * FROM student_clearance WHERE student_id = ?",
+        [studentId]
+      );
+
+      // No clearance record
+      if (results.length === 0) {
+        return res.json({
+          can_request: false,
+          reason:
+            "No clearance record found. Please complete your clearance first.",
+        });
+      }
+
+      const clearance = results[0];
+
+      // Check if expired
+      if (isClearanceExpired(clearance.clearance_expiry)) {
+        return res.json({
+          can_request: false,
+          reason:
+            "Your clearance has expired. Please get re-approved by all departments.",
+        });
+      }
+
+      // Check if all approved
+      const allApproved = [
+        clearance.registrar_status,
+        clearance.guidance_status,
+        clearance.mis_status,
+        clearance.library_status,
+        clearance.cashier_status,
+      ].every((s) => s === "approved");
+
+      if (!allApproved) {
+        return res.json({
+          can_request: false,
+          reason:
+            "You must be cleared by all departments before requesting documents.",
+        });
+      }
+
+      // All good!
+      res.json({
+        can_request: true,
+        clearance_expiry: clearance.clearance_expiry,
+      });
+    } catch (error) {
+      console.error("Error checking clearance:", error);
+      res
+        .status(500)
+        .json({
+          message: "Failed to check clearance",
+          details: error.message,
+        });
+    }
+  }
+);
+
+
 export default router
