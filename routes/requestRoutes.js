@@ -12,47 +12,47 @@ async function updateClearanceRow(requestId, department, status, reason) {
   const validDepartments = [
     "registrar", "guidance", "engineering",
     "criminology", "mis", "library", "cashier"
-  ];
+  ]
   if (!validDepartments.includes(department)) {
-    const err = new Error("Invalid department");
-    err.code = "INVALID_DEPARTMENT";
-    throw err;
+    const err = new Error("Invalid department")
+    err.code = "INVALID_DEPARTMENT"
+    throw err
   }
 
-  const approvedAtField = `${department}_approved_at`;
-  const statusField = `${department}_status`;
-  const reasonField = `${department}_reason`;
+  const approvedAtField = `${department}_approved_at`
+  const statusField = `${department}_status`
+  const reasonField = `${department}_reason`
 
-  let query, params;
+  let query, params
   if (status === "approved") {
     query = `UPDATE request_clearances
              SET ${statusField} = ?, ${reasonField} = NULL, ${approvedAtField} = NOW()
-             WHERE request_id = ?`;
-    params = [status, requestId];
+             WHERE request_id = ?`
+    params = [status, requestId]
   } else if (status === "rejected" && reason) {
     query = `UPDATE request_clearances
              SET ${statusField} = ?, ${reasonField} = ?, ${approvedAtField} = NULL
-             WHERE request_id = ?`;
-    params = [status, reason, requestId];
+             WHERE request_id = ?`
+    params = [status, reason, requestId]
   } else {
     query = `UPDATE request_clearances
              SET ${statusField} = ?, ${approvedAtField} = NULL
-             WHERE request_id = ?`;
-    params = [status, requestId];
+             WHERE request_id = ?`
+    params = [status, requestId]
   }
 
-  const [result] = await pool.query(query, params);
+  const [result] = await pool.query(query, params)
   if (result.affectedRows === 0) {
     // If there's no clearance row yet, create it then retry the update
-    const [exists] = await pool.query("SELECT 1 FROM request_clearances WHERE request_id = ?", [requestId]);
+    const [exists] = await pool.query("SELECT 1 FROM request_clearances WHERE request_id = ?", [requestId])
     if (exists.length === 0) {
-      await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId]);
-      const [retry] = await pool.query(query, params);
+      await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId])
+      const [retry] = await pool.query(query, params)
       if (retry.affectedRows === 0) {
-        throw new Error("Failed to update clearance after creating row");
+        throw new Error("Failed to update clearance after creating row")
       }
     } else {
-      throw new Error("Failed to update clearance");
+      throw new Error("Failed to update clearance")
     }
   }
 
@@ -63,23 +63,23 @@ async function updateClearanceRow(requestId, department, status, reason) {
      FROM request_clearances
      WHERE request_id = ?`,
     [requestId]
-  );
+  )
 
   if (clearanceStatusRows.length > 0) {
-    const statuses = Object.values(clearanceStatusRows[0]).map(s => (s || "").toLowerCase());
-    const anyRejected = statuses.some(s => s === 'rejected');
-    const allApproved = statuses.every(s => s === 'approved');
+    const statuses = Object.values(clearanceStatusRows[0]).map(s => (s || "").toLowerCase())
+    const anyRejected = statuses.some(s => s === 'rejected')
+    const allApproved = statuses.every(s => s === 'approved')
 
     if (anyRejected) {
-      await pool.query("UPDATE requests SET status = 'rejected' WHERE request_id = ?", [requestId]);
+      await pool.query("UPDATE requests SET status = 'rejected' WHERE request_id = ?", [requestId])
     } else if (allApproved) {
-      await pool.query("UPDATE requests SET status = 'approved' WHERE request_id = ?", [requestId]);
+      await pool.query("UPDATE requests SET status = 'approved' WHERE request_id = ?", [requestId])
     } else {
       // optional: keep as is (pending/in-progress)
     }
   }
 
-  return true;
+  return true
 }
 
 /* ==========================
@@ -226,9 +226,9 @@ router.get("/api/clearances", async (req, res) => {
    Get a single clearance (detailed) — merges request + clearance + student info
    ========================== */
 router.get("/api/clearances/:requestId", async (req, res) => {
-  const { requestId } = req.params;
+  const { requestId } = req.params
   
-  console.log(`Fetching clearance for request_id: ${requestId}`);
+  console.log(`Fetching clearance for request_id: ${requestId}`)
   
   try {
     const [requestRows] = await pool.query(
@@ -257,31 +257,31 @@ router.get("/api/clearances/:requestId", async (req, res) => {
        LEFT JOIN \`user\` u ON r.student_id = u.uid
        WHERE r.request_id = ?`,
       [requestId]
-    );
+    )
 
     if (requestRows.length === 0) {
-      console.log(`Request ${requestId} not found`);
-      return res.status(404).json({ message: "Request not found" });
+      console.log(`Request ${requestId} not found`)
+      return res.status(404).json({ message: "Request not found" })
     }
 
-    const request = requestRows[0];
+    const request = requestRows[0]
 
     // Try to get clearance data (may not exist yet)
     const [clearanceRows] = await pool.query(
       `SELECT * FROM request_clearances WHERE request_id = ?`,
       [requestId]
-    );
+    )
 
-    let clearanceData = {};
+    let clearanceData = {}
     if (clearanceRows.length > 0) {
-      clearanceData = clearanceRows[0];
+      clearanceData = clearanceRows[0]
     } else {
       // No clearance yet - create one
-      console.log(`No clearance found for request ${requestId}, creating one...`);
+      console.log(`No clearance found for request ${requestId}, creating one...`)
       await pool.query(
         "INSERT INTO request_clearances (request_id) VALUES (?)",
         [requestId]
-      );
+      )
       // Provide default values so frontend doesn't break
       clearanceData = {
         registrar_status: 'pending',
@@ -291,7 +291,7 @@ router.get("/api/clearances/:requestId", async (req, res) => {
         mis_status: 'pending',
         library_status: 'pending',
         cashier_status: 'pending'
-      };
+      }
     }
 
     // Merge everything together and keep both status keys for compatibility:
@@ -300,21 +300,21 @@ router.get("/api/clearances/:requestId", async (req, res) => {
       ...request,
       request_status: request.status,
       ...clearanceData
-    };
+    }
 
-    console.log(`Successfully fetched clearance for request ${requestId}`);
-    res.json(response);
+    console.log(`Successfully fetched clearance for request ${requestId}`)
+    res.json(response)
     
   } catch (err) {
-    console.error("Error fetching clearance:", err.message);
-    console.error("Full error:", err);
+    console.error("Error fetching clearance:", err.message)
+    console.error("Full error:", err)
     res.status(500).json({ 
       error: "Internal server error", 
       details: err.message,
       sql: err.sql 
-    });
+    })
   }
-});
+})
 
 /* ==========================
    Update clearance for a department (main route)
@@ -371,36 +371,32 @@ router.put("/api/clearances/:requestId/:department", async (req, res) => {
    Request body must contain { department } or { department, reason }
    ========================== */
 router.put("/api/clearances/:requestId/approve", async (req, res) => {
-  const { requestId } = req.params;
-  const { department } = req.body;
+  const { requestId } = req.params
+  const { department } = req.body
   try {
-    if (!department) return res.status(400).json({ message: "Missing department in body" });
-    await updateClearanceRow(requestId, department, "approved", null);
-    res.json({ message: `${department} approved successfully` });
+    if (!department) return res.status(400).json({ message: "Missing department in body" })
+    await updateClearanceRow(requestId, department, "approved", null)
+    res.json({ message: `${department} approved successfully` })
   } catch (err) {
-    console.error("Approve error:", err);
-    res.status(500).json({ error: "Failed to approve", details: err.message });
+    console.error("Approve error:", err)
+    res.status(500).json({ error: "Failed to approve", details: err.message })
   }
-});
+})
 
 router.put("/api/clearances/:requestId/reject", async (req, res) => {
-  const { requestId } = req.params;
-  const { department, reason } = req.body;
+  const { requestId } = req.params
+  const { department, reason } = req.body
   try {
-    if (!department) return res.status(400).json({ message: "Missing department in body" });
-    if (!reason) return res.status(400).json({ message: "Missing reason for rejection" });
-    await updateClearanceRow(requestId, department, "rejected", reason);
-    res.json({ message: `${department} rejected successfully` });
+    if (!department) return res.status(400).json({ message: "Missing department in body" })
+    if (!reason) return res.status(400).json({ message: "Missing reason for rejection" })
+    await updateClearanceRow(requestId, department, "rejected", reason)
+    res.json({ message: `${department} rejected successfully` })
   } catch (err) {
-    console.error("Reject error:", err);
-    res.status(500).json({ error: "Failed to reject", details: err.message });
+    console.error("Reject error:", err)
+    res.status(500).json({ error: "Failed to reject", details: err.message })
   }
-});
+})
 
-/* ==========================
-   Deprecated/compat cashier route (kept for compatibility)
-   If you prefer, you may remove this — the generic routes above handle cashier too.
-   ========================== */
 router.put("/api/clearances/:userId/cashier", async (req, res) => {
   const { userId } = req.params
   const { status } = req.body
@@ -484,7 +480,7 @@ router.get("/get-all-requests", async (req, res) => {
 })
 
 /* ==========================
-   Get requests (joined) — this was causing your frontend change; kept original field names
+   Get requests (joined) — this was causing your frontend change kept original field names
    so frontend doesn't break (status remains `status`, document_name, username present)
    ========================== */
 router.get("/get-requests", async (req, res) => {
@@ -648,6 +644,168 @@ router.get("/api/users/:id", async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Internal server error" })
+  }
+})
+
+router.delete("/cancel-request/:request_id", async (req, res) => {
+  const { request_id } = req.params
+  try {
+    const [result] = await pool.query(
+      "DELETE FROM requests WHERE request_id = ?",
+      [request_id]
+    )
+    return res.status(200).json({ message: "Document request has been cancelled." })
+  } catch (err) {
+    console.error(err)
+    return res.status(500).json({ message: "Internal server error." })
+  }
+})
+
+router.post("/add-to-cart", async (req, res) => {
+  const { user_id, doc_id, reason } = req.body
+  if (!user_id || !doc_id || !reason)
+    return res.status(400).json({ message: "Missing required fields" })
+
+  try {
+    // Prevent duplicate items
+    const [existing] = await pool.query(
+      "SELECT * FROM document_cart WHERE user_id = ? AND doc_id = ?",
+      [user_id, doc_id]
+    )
+
+    if (existing.length > 0)
+      return res.status(400).json({ message: "Document already in cart." })
+
+    // Insert with reason
+    await pool.query(
+      "INSERT INTO document_cart (user_id, doc_id, reason) VALUES (?, ?, ?)",
+      [user_id, doc_id, reason]
+    )
+
+    res.status(200).json({ message: "Document added to cart successfully." })
+  } catch (err) {
+    console.error("Error adding to cart:", err)
+    res.status(500).json({ message: "Internal server error." })
+  }
+})
+
+router.get("/cart", async (req, res) => {
+  const { user_id } = req.query
+  if (!user_id) return res.status(400).json({ message: "Missing user_id" })
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT 
+        c.item_id,
+        d.document_id,
+        d.name AS doc_name,
+        d.fee AS doc_fee,
+        d.category,
+        c.reason
+      FROM document_cart c
+      JOIN document_types d ON c.doc_id = d.document_id
+      WHERE c.user_id = ?`,
+      [user_id]
+    )
+
+    res.json(rows)
+  } catch (err) {
+    console.error("Error fetching cart:", err)
+    res.status(500).json({ message: "Internal server error" })
+  }
+})
+
+router.delete("/remove-from-cart/:item_id", async (req, res) => {
+  const { item_id } = req.params
+
+  if (!item_id) {
+    return res.status(400).json({ message: "Missing item_id" })
+  }
+
+  try {
+    const [result] = await pool.query(
+      "DELETE FROM document_cart WHERE item_id = ?",
+      [item_id]
+    )
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Item not found" })
+    }
+
+    res.status(200).json({ message: "Item removed from cart successfully." })
+  } catch (err) {
+    console.error("Error removing from cart:", err)
+    res.status(500).json({ message: "Internal server error." })
+  }
+})
+
+router.post("/checkout", async (req, res) => {
+  const { user_id } = req.body
+  if (!user_id) return res.status(400).json({ message: "Missing user_id" })
+
+  try {
+    // 1️⃣ Fetch all cart items for the user (including reason)
+    const [cartItems] = await pool.query(
+      `SELECT 
+         c.item_id, 
+         c.doc_id, 
+         c.reason, 
+         d.name AS doc_name, 
+         d.fee AS doc_fee
+       FROM document_cart c
+       JOIN document_types d ON c.doc_id = d.document_id
+       WHERE c.user_id = ?`,
+      [user_id]
+    )
+
+    if (cartItems.length === 0)
+      return res.status(400).json({ message: "Your cart is empty." })
+
+    // 2️⃣ Calculate submission and release dates
+    const submissionDate = new Date().toISOString()
+    const releaseDate = new Date()
+    releaseDate.setDate(releaseDate.getDate() + 3)
+
+    const createdRequests = []
+
+    // 3️⃣ Insert each cart item as a new request
+    for (const item of cartItems) {
+      const [insertResult] = await pool.query(
+        `INSERT INTO requests 
+          (student_id, document_id, payment, status, release_date, submission_date, reason, amount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          user_id,                      // student_id
+          item.doc_id,                  // document_id
+          "pending",                    // payment
+          "Pending",                    // status
+          releaseDate,                  // release_date
+          submissionDate,               // submission_date
+          item.reason || "No reason provided", // reason from cart
+          item.doc_fee                  // amount
+        ]
+      )
+
+      createdRequests.push({
+        request_id: insertResult.insertId,
+        document: item.doc_name,
+        fee: item.doc_fee,
+        reason: item.reason || "No reason provided",
+        release_date: releaseDate
+      })
+    }
+
+    // 4️⃣ Clear the user’s cart
+    await pool.query("DELETE FROM document_cart WHERE user_id = ?", [user_id])
+
+    // 5️⃣ Respond with summary
+    res.status(200).json({
+      message: "Checkout successful! Requests have been created.",
+      requests_created: createdRequests
+    })
+  } catch (err) {
+    console.error("Error during checkout:", err)
+    res.status(500).json({ message: "Internal server error." })
   }
 })
 

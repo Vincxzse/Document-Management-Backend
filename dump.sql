@@ -186,3 +186,14 @@
 
 -- ALTER TABLE user MODIFY uid INT AUTO_INCREMENT PRIMARY KEY;
 -- ALTER TABLE clearances MODIFY clearance_id INT AUTO_INCREMENT PRIMARY KEY;
+
+-- CREATE TABLE document_cart (
+--     `item_id` INT NOT NULL AUTO_INCREMENT,
+--     `user_id` INT NOT NULL,
+--     `doc_id` INT NOT NULL,
+--     PRIMARY KEY (`item_id`),
+--     CONSTRAINT `fk_cart_user` FOREIGN KEY (`user_id`) REFERENCES `user`(`uid`) ON DELETE CASCADE ON UPDATE CASCADE,
+--     CONSTRAINT `fk_cart_document` FOREIGN KEY (`doc_id`) REFERENCES `document_types`(`document_id`) ON DELETE CASCADE ON UPDATE CASCADE
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- SHOW CREATE TABLE document_types;
