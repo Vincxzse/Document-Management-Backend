@@ -106,6 +106,7 @@ router.post('/reject-req/:request_id', async (req, res) => {
    Create request
    - Inserts into requests, then auto-creates request_clearances record
    ========================== */
+// UPDATE /create-request to insert into request_documents junction table
 router.post("/create-request", async (req, res) => {
   try {
     const { student_id, document_id, request_reason } = req.body
@@ -142,13 +143,19 @@ router.post("/create-request", async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO requests 
       (student_id, document_id, submission_date, release_date, status, payment, reason) 
-      VALUES (?, ?, NOW(), ?, 'pending', 'pending', ?)`,
+      VALUES (?, ?, NOW(), ?, 'Pending', 'pending', ?)`,
       [student_id, document_id, formattedReleaseDate, request_reason]
     )
 
     const requestId = result.insertId
 
-    // 2. Insert into request_clearances (auto-create record)
+    // 2. Insert into request_documents junction table
+    await pool.query(
+      "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
+      [requestId, document_id]
+    )
+
+    // 3. Insert into request_clearances (auto-create record)
     await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId])
 
     res.status(201).json({
@@ -165,69 +172,66 @@ router.post("/create-request", async (req, res) => {
 /* ==========================
    Approve payment
    ========================== */
-router.put("/approve-payment/:id", async (req, res) => {
-  const { id } = req.params
+router.put("/approve-payment/:request_id", async (req, res) => {
   try {
-    await pool.query("UPDATE requests SET payment = 'approved' WHERE request_id = ?", [id])
-    res.json({ message: "Payment approved successfully" })
-  } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: "Failed to approve payment" })
+    const { request_id } = req.params;
+
+    const [result] = await pool.query(
+      `UPDATE requests SET payment = 'approved', status = 'in progress' 
+       WHERE request_id = ?`,
+      [request_id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    res.json({ message: "Payment approved for all documents in this request" });
+
+  } catch (error) {
+    console.error("Approve payment error:", error);
+    res.status(500).json({
+      message: "Failed to approve payment",
+      details: error.message
+    });
   }
-})
+});
 
 /* ==========================
    Reject payment
    ========================== */
-router.put("/reject-payment/:id", async (req, res) => {
-  const { id } = req.params
-  const { reason } = req.body
+router.put("/reject-payment/:request_id", async (req, res) => {
   try {
-    await pool.query(
-      "UPDATE requests SET payment = 'rejected', rejection_reason = ? WHERE request_id = ?",
-      [reason, id]
-    )
-    res.json({ message: "Payment rejected successfully" })
-  } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: "Failed to reject payment" })
-  }
-})
+    const { request_id } = req.params;
+    const { reason } = req.body;
 
-/* ==========================
-   Get all clearances (joined with user info)
-   ========================== */
-router.get("/api/clearances", async (req, res) => {
-  try {
-    const [rows] = await pool.query(`
-      SELECT 
-        r.request_id, r.student_id, r.document_id, r.status AS request_status, r.payment,
-        u.uid, u.username, u.course, u.email,
-        c.registrar_status, c.registrar_reason,
-        c.guidance_status, c.guidance_reason,
-        c.engineering_status, c.engineering_reason,
-        c.criminology_status, c.criminology_reason,
-        c.mis_status, c.mis_reason,
-        c.library_status, c.library_reason,
-        c.cashier_status, c.cashier_reason
-      FROM requests r
-      JOIN \`user\` u ON r.student_id = u.uid
-      LEFT JOIN request_clearances c ON r.request_id = c.request_id
-      ORDER BY r.submission_date DESC
-    `)
-    res.json(rows)
-  } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: "Internal server error" })
+    const [result] = await pool.query(
+      `UPDATE requests 
+       SET payment = 'rejected', rejection_reason = ?
+       WHERE request_id = ?`,
+      [reason || null, request_id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    res.json({ message: "Payment rejected" });
+
+  } catch (error) {
+    console.error("Reject payment error:", error);
+    res.status(500).json({
+      message: "Failed to reject payment",
+      details: error.message
+    });
   }
-})
+});
 
 /* ==========================
    Get a single clearance (detailed) — merges request + clearance + student info
    ========================== */
 router.get("/api/clearances/:requestId", async (req, res) => {
   const { requestId } = req.params
-  
   console.log(`Fetching clearance for request_id: ${requestId}`)
   
   try {
@@ -425,36 +429,37 @@ router.put("/api/clearances/:userId/cashier", async (req, res) => {
 /* ==========================
    Get requests for a student
    ========================== */
-router.get("/requests/:student_id", async (req, res) => {
+router.get("/requests/:user_id", async (req, res) => {
   try {
-    const { student_id } = req.params
+    const { user_id } = req.params;
 
     const [requests] = await pool.query(
-      `SELECT 
-        r.request_id, 
-        r.student_id, 
-        r.document_id, 
-        r.status, 
-        r.payment,
-        r.request_rejection,
-        r.rejection_reason,
-        r.payment_attachment,
-        DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
-        DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
-        d.name AS document_name
-      FROM requests r
-      JOIN document_types d ON r.document_id = d.document_id
-      WHERE r.student_id = ?
-      ORDER BY r.submission_date DESC`,
-      [student_id]
-    )
+      `SELECT r.*, 
+              CASE 
+                WHEN COUNT(rd.document_id) > 0 THEN GROUP_CONCAT(dt.name SEPARATOR ', ')
+                ELSE dt_single.name
+              END AS document_name,
+              COALESCE(COUNT(DISTINCT rd.document_id), 1) as document_count
+       FROM requests r
+       LEFT JOIN request_documents rd ON r.request_id = rd.request_id
+       LEFT JOIN document_types dt ON rd.document_id = dt.document_id
+       LEFT JOIN document_types dt_single ON r.document_id = dt_single.document_id
+       WHERE r.student_id = ?
+       GROUP BY r.request_id, dt_single.name
+       ORDER BY r.submission_date DESC`,
+      [user_id]
+    );
 
-    res.status(200).json({ requests })
-  } catch (err) {
-    console.error(err.message)
-    res.status(500).json({ message: "Internal server error" })
+    res.json({ requests });
+
+  } catch (error) {
+    console.error("Fetch requests error:", error);
+    res.status(500).json({
+      message: "Failed to fetch requests",
+      details: error.message
+    });
   }
-})
+});
 
 /* ==========================
    Get all requests (admin)
@@ -489,13 +494,19 @@ router.get("/get-requests", async (req, res) => {
       SELECT 
         r.request_id,
         r.student_id,
-        r.document_id,
         r.status,
         r.payment,
+        r.payment_attachment,
+        r.reference_no,
+        r.amount,
         r.rejection_reason,
         DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
         DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
-        d.name AS document_name,
+        CASE 
+          WHEN COUNT(rd.document_id) > 0 THEN GROUP_CONCAT(d.name SEPARATOR ', ')
+          ELSE dt.name
+        END AS document_name,
+        COALESCE(COUNT(DISTINCT rd.document_id), 1) AS document_count,
         u.username,
         u.course,
         u.email,
@@ -507,16 +518,19 @@ router.get("/get-requests", async (req, res) => {
         c.library_status,
         c.cashier_status
       FROM requests r
-      INNER JOIN document_types d ON r.document_id = d.document_id
       INNER JOIN \`user\` u ON r.student_id = u.uid
       LEFT JOIN request_clearances c ON r.request_id = c.request_id
+      LEFT JOIN request_documents rd ON r.request_id = rd.request_id
+      LEFT JOIN document_types d ON rd.document_id = d.document_id
+      LEFT JOIN document_types dt ON r.document_id = dt.document_id
+      GROUP BY r.request_id, u.username, u.course, u.email, dt.name, c.registrar_status, c.guidance_status, c.engineering_status, c.criminology_status, c.mis_status, c.library_status, c.cashier_status
       ORDER BY r.submission_date DESC
     `)
 
     res.status(200).json({ fetchRequests })
   } catch (err) {
     console.error("Error fetching requests:", err)
-    res.status(500).json({ error: "Failed to fetch requests" })
+    res.status(500).json({ error: "Failed to fetch requests", details: err.message })
   }
 })
 
@@ -740,74 +754,81 @@ router.delete("/remove-from-cart/:item_id", async (req, res) => {
 })
 
 router.post("/checkout", async (req, res) => {
-  const { user_id } = req.body
-  if (!user_id) return res.status(400).json({ message: "Missing user_id" })
-
   try {
-    // 1️⃣ Fetch all cart items for the user (including reason)
-    const [cartItems] = await pool.query(
-      `SELECT 
-         c.item_id, 
-         c.doc_id, 
-         c.reason, 
-         d.name AS doc_name, 
-         d.fee AS doc_fee
-       FROM document_cart c
-       JOIN document_types d ON c.doc_id = d.document_id
-       WHERE c.user_id = ?`,
-      [user_id]
-    )
+    const { user_id, selected_items } = req.body;
 
-    if (cartItems.length === 0)
-      return res.status(400).json({ message: "Your cart is empty." })
-
-    // 2️⃣ Calculate submission and release dates
-    const submissionDate = new Date().toISOString()
-    const releaseDate = new Date()
-    releaseDate.setDate(releaseDate.getDate() + 3)
-
-    const createdRequests = []
-
-    // 3️⃣ Insert each cart item as a new request
-    for (const item of cartItems) {
-      const [insertResult] = await pool.query(
-        `INSERT INTO requests 
-          (student_id, document_id, payment, status, release_date, submission_date, reason, amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          user_id,                      // student_id
-          item.doc_id,                  // document_id
-          "pending",                    // payment
-          "Pending",                    // status
-          releaseDate,                  // release_date
-          submissionDate,               // submission_date
-          item.reason || "No reason provided", // reason from cart
-          item.doc_fee                  // amount
-        ]
-      )
-
-      createdRequests.push({
-        request_id: insertResult.insertId,
-        document: item.doc_name,
-        fee: item.doc_fee,
-        reason: item.reason || "No reason provided",
-        release_date: releaseDate
-      })
+    if (!user_id || !selected_items || selected_items.length === 0) {
+      return res.status(400).json({ message: "Invalid checkout data" });
     }
 
-    // 4️⃣ Clear the user’s cart
-    await pool.query("DELETE FROM document_cart WHERE user_id = ?", [user_id])
+    // Fetch cart items to get document info
+    const [cartItems] = await pool.query(
+      "SELECT * FROM document_cart WHERE user_id = ? AND item_id IN (?)",
+      [user_id, selected_items]
+    );
 
-    // 5️⃣ Respond with summary
-    res.status(200).json({
-      message: "Checkout successful! Requests have been created.",
-      requests_created: createdRequests
-    })
-  } catch (err) {
-    console.error("Error during checkout:", err)
-    res.status(500).json({ message: "Internal server error." })
+    if (cartItems.length === 0) {
+      return res.status(404).json({ message: "No cart items found" });
+    }
+
+    // Extract unique document IDs and get their fees
+    const documentIds = cartItems.map(item => item.doc_id);
+    const [documents] = await pool.query(
+      "SELECT document_id, fee FROM document_types WHERE document_id IN (?)",
+      [documentIds]
+    );
+
+    // Calculate total amount
+    const totalAmount = documents.reduce((sum, doc) => sum + parseFloat(doc.fee || 0), 0);
+
+    // Create ONE request for all documents
+    const submission_date = new Date().toISOString();
+    const [result] = await pool.query(
+      `INSERT INTO requests 
+       (student_id, document_ids, payment, status, submission_date, amount) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        user_id,
+        JSON.stringify(documentIds), // Store all document IDs as JSON array
+        "pending",
+        "Pending",
+        submission_date,
+        totalAmount.toFixed(2)
+      ]
+    );
+
+    const requestId = result.insertId;
+
+    // Option: If using junction table instead
+    // Insert into request_documents junction table
+    for (const docId of documentIds) {
+      await pool.query(
+        "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
+        [requestId, docId]
+      );
+    }
+
+    // Remove items from cart
+    await pool.query(
+      "DELETE FROM document_cart WHERE user_id = ? AND item_id IN (?)",
+      [user_id, selected_items]
+    );
+
+    res.json({
+      message: "Checkout successful! One request created for all documents.",
+      request_id: requestId,
+      total_documents: documentIds.length,
+      total_amount: totalAmount.toFixed(2)
+    });
+
+  } catch (error) {
+    console.error("Checkout error:", error);
+    res.status(500).json({
+      message: "Checkout failed",
+      details: error.message
+    });
   }
-})
+});
 
 
 // ============================================================================
@@ -900,11 +921,13 @@ router.get("/api/student-clearances/:studentId", async (req, res) => {
       SELECT 
         u.uid, u.username, u.email, u.course, u.role,
         sc.registrar_status, sc.guidance_status, sc.mis_status, 
-        sc.library_status, sc.cashier_status,
+        sc.library_status, sc.cashier_status, sc.engineering_status, sc.criminology_status,
         sc.registrar_reason, sc.guidance_reason, sc.mis_reason,
-        sc.library_reason, sc.cashier_reason,
+        sc.library_reason, sc.cashier_reason, sc.engineering_reason, sc.criminology_reason,
         sc.registrar_approved_at, sc.guidance_approved_at, sc.mis_approved_at,
-        sc.library_approved_at, sc.cashier_approved_at,
+        sc.library_approved_at, sc.cashier_approved_at, sc.engineering_approved_at, sc.criminology_approved_at,
+        sc.registrar_rejected_at, sc.guidance_rejected_at, sc.mis_rejected_at,
+        sc.library_rejected_at, sc.cashier_rejected_at, sc.engineering_rejected_at, sc.criminology_rejected_at,
         sc.last_cleared, sc.clearance_expiry
       FROM \`user\` u
       LEFT JOIN student_clearance sc ON u.uid = sc.student_id
@@ -952,16 +975,29 @@ router.get("/api/student-clearances/:studentId", async (req, res) => {
             mis_status = 'pending',
             library_status = 'pending',
             cashier_status = 'pending',
+            engineering_status = 'pending',
+            criminology_status = 'pending',
             registrar_reason = NULL,
             guidance_reason = NULL,
             mis_reason = NULL,
             library_reason = NULL,
             cashier_reason = NULL,
+            engineering_reason = NULL,
+            criminology_reason = NULL,
             registrar_approved_at = NULL,
             guidance_approved_at = NULL,
             mis_approved_at = NULL,
             library_approved_at = NULL,
             cashier_approved_at = NULL,
+            engineering_approved_at = NULL,
+            criminology_approved_at = NULL,
+            registrar_rejected_at = NULL,
+            guidance_rejected_at = NULL,
+            mis_rejected_at = NULL,
+            library_rejected_at = NULL,
+            cashier_rejected_at = NULL,
+            engineering_rejected_at = NULL,
+            criminology_rejected_at = NULL,
             clearance_expiry = NULL
         WHERE student_id = ?
       `,
@@ -1008,17 +1044,30 @@ router.put(
 
       console.log(`Updating clearance - Student: ${studentId}, Dept: ${department}, Status: ${status}`);
 
-      // Validate department
+      // Validate department - accept both names and database field names
       const validDepts = [
         "registrar",
         "guidance",
         "mis",
         "library",
         "cashier",
+        "engineering",
+        "criminology",
+        "engineering and architecture",
+        "criminal justice",
       ];
+      
       if (!validDepts.includes(department)) {
         return res.status(400).json({ message: "Invalid department" });
       }
+
+      // Map display names to database field names
+      const deptMap = {
+        "engineering and architecture": "engineering",
+        "criminal justice": "criminology",
+      };
+      
+      const dbDept = deptMap[department] || department;
 
       // Validate status
       if (!["approved", "rejected", "pending"].includes(status)) {
@@ -1055,16 +1104,29 @@ router.put(
               mis_status = 'pending',
               library_status = 'pending',
               cashier_status = 'pending',
+              engineering_status = 'pending',
+              criminology_status = 'pending',
               registrar_reason = NULL,
               guidance_reason = NULL,
               mis_reason = NULL,
               library_reason = NULL,
               cashier_reason = NULL,
+              engineering_reason = NULL,
+              criminology_reason = NULL,
               registrar_approved_at = NULL,
               guidance_approved_at = NULL,
               mis_approved_at = NULL,
               library_approved_at = NULL,
               cashier_approved_at = NULL,
+              engineering_approved_at = NULL,
+              criminology_approved_at = NULL,
+              registrar_rejected_at = NULL,
+              guidance_rejected_at = NULL,
+              mis_rejected_at = NULL,
+              library_rejected_at = NULL,
+              cashier_rejected_at = NULL,
+              engineering_rejected_at = NULL,
+              criminology_rejected_at = NULL,
               clearance_expiry = NULL
           WHERE student_id = ?
         `,
@@ -1073,9 +1135,10 @@ router.put(
       }
 
       // Apply the department update
-      const statusField = `${department}_status`;
-      const reasonField = `${department}_reason`;
-      const dateField = `${department}_approved_at`;
+      const statusField = `${dbDept}_status`;
+      const reasonField = `${dbDept}_reason`;
+      const approvedAtField = `${dbDept}_approved_at`;
+      const rejectedAtField = `${dbDept}_rejected_at`;
 
       let updateQuery, params;
 
@@ -1084,29 +1147,38 @@ router.put(
           UPDATE student_clearance 
           SET ${statusField} = ?, 
               ${reasonField} = NULL,
-              ${dateField} = NOW()
+              ${approvedAtField} = NOW(),
+              ${rejectedAtField} = NULL
           WHERE student_id = ?
         `;
         params = [status, studentId];
+        console.log(`Setting ${statusField} = ${status}, ${approvedAtField} = NOW()`);
       } else if (status === "rejected") {
         updateQuery = `
           UPDATE student_clearance 
           SET ${statusField} = ?, 
               ${reasonField} = ?,
-              ${dateField} = NULL
+              ${approvedAtField} = NULL,
+              ${rejectedAtField} = NOW()
           WHERE student_id = ?
         `;
         params = [status, reason || null, studentId];
+        console.log(`Setting ${statusField} = ${status}, ${rejectedAtField} = NOW()`);
       } else {
         updateQuery = `
           UPDATE student_clearance 
           SET ${statusField} = ?, 
               ${reasonField} = NULL,
-              ${dateField} = NULL
+              ${approvedAtField} = NULL,
+              ${rejectedAtField} = NULL
           WHERE student_id = ?
         `;
         params = [status, studentId];
+        console.log(`Setting ${statusField} = ${status}`);
       }
+
+      console.log("Update query:", updateQuery);
+      console.log("Params:", params);
 
       const [updateResult] = await pool.query(updateQuery, params);
 
@@ -1120,13 +1192,14 @@ router.put(
       const [final] = await pool.query(checkQuery, [studentId]);
       const finalClearance = final[0];
 
-      const allApproved = validDepts.every(
+      const baseDepts = ["registrar", "guidance", "mis", "library", "cashier"];
+      const allApproved = baseDepts.every(
         (d) => finalClearance[`${d}_status`] === "approved"
       );
 
       if (allApproved) {
         console.log(
-          `All departments approved! Setting expiry for student ${studentId} to 6 months from now`
+          `All base departments approved! Setting expiry for student ${studentId} to 6 months from now`
         );
         
         // Set expiry to 6 months from today (not from the current time)
@@ -1147,7 +1220,7 @@ router.put(
       }
 
       console.log(
-        `Successfully updated ${department} clearance for student ${studentId}`
+        `Successfully updated ${dbDept} clearance for student ${studentId}`
       );
       res.json({ message: "Clearance updated successfully" });
     } catch (error) {

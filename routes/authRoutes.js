@@ -137,32 +137,63 @@ router.post("/login", async (req, res) => {
 })
 
 router.post("/upload-file", upload.single("file"), async (req, res) => {
-  try {
-    const { request_id, reference_number, amount_sent } = req.body
+    try {
+        const { request_id, reference_number, amount_sent } = req.body
 
-    if (!req.file) return res.status(400).json({ message: "No file uploaded" })
+        console.log("=== UPLOAD DEBUG ===");
+        console.log("request_id:", request_id);
+        console.log("reference_number:", reference_number);
+        console.log("amount_sent:", amount_sent);
+        console.log("file:", req.file);
 
-    await pool.query(
-      `UPDATE requests 
-       SET payment_attachment = ?, reference_no = ?, amount = ? 
-       WHERE request_id = ?`,
-      [req.file.path, reference_number, amount_sent, request_id]
-    )
+        if (!req.file) {
+        console.error("No file uploaded");
+        return res.status(400).json({ message: "No file uploaded" });
+        }
 
-    res.status(200).json({
-      message: "File uploaded successfully",
-      file: {
-        name: req.file.originalname,
-        path: `/attachments/${req.file.filename}`,
-        url: `${req.protocol}://${req.get("host")}/attachments/${req.file.filename}`
-      }
-    })
-  } catch (err) {
-    console.error("Upload Error:", err.message)
-    res.status(500).json({ message: "Internal server error" })
-  }
-})
+        if (!request_id) {
+        console.error("No request_id provided");
+        return res.status(400).json({ message: "request_id is required" });
+        }
 
+        console.log("Updating request with:", {
+        path: req.file.path,
+        reference_no: reference_number,
+        amount: amount_sent,
+        request_id: request_id
+        });
+
+        const [result] = await pool.query(
+        `UPDATE requests 
+        SET payment_attachment = ?, reference_no = ?, amount = ? 
+        WHERE request_id = ?`,
+        [req.file.path, reference_number, amount_sent, request_id]
+        );
+
+        console.log("Update result:", result);
+
+        if (result.affectedRows === 0) {
+        console.error("No rows updated - request_id might not exist");
+        return res.status(404).json({ message: "Request not found" });
+        }
+
+        res.status(200).json({
+        message: "File uploaded successfully",
+        file: {
+            name: req.file.originalname,
+            path: `/attachments/${req.file.filename}`,
+            url: `${req.protocol}://${req.get("host")}/attachments/${req.file.filename}`
+        }
+        });
+
+    } catch (err) {
+        console.error("Upload Error:", err);
+        res.status(500).json({ 
+        message: "Internal server error",
+        details: err.message 
+        });
+    }
+});
 
 router.post("/register/alumni-confirmation", async (req, res) => {
   try {
