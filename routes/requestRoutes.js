@@ -490,6 +490,32 @@ router.get("/get-all-requests", async (req, res) => {
    ========================== */
 router.get("/get-requests", async (req, res) => {
   try {
+    const { role, department } = req.query; 
+    // Example: ?role=admin&department=engineering
+
+    let whereClause = "";
+    const params = [];
+
+    // Super Admin can see everything
+    if (role !== "super admin") {
+      if (department === "engineering") {
+        whereClause = "WHERE LOWER(u.course) LIKE ?";
+        params.push("%engineering%");
+      } else if (department === "criminology") {
+        whereClause = "WHERE LOWER(u.course) LIKE ?";
+        params.push("%criminology%");
+      } else if (department === "mis") {
+        whereClause = "WHERE LOWER(u.course) LIKE ?";
+        params.push("%information technology%");
+      } else if (department === "guidance" || department === "registrar" || department === "cashier" || department === "library") {
+        // These departments can see all requests (optional — adjust if needed)
+        whereClause = "";
+      } else {
+        // Default: no restriction
+        whereClause = "";
+      }
+    }
+
     const [fetchRequests] = await pool.query(`
       SELECT 
         r.request_id,
@@ -523,16 +549,20 @@ router.get("/get-requests", async (req, res) => {
       LEFT JOIN request_documents rd ON r.request_id = rd.request_id
       LEFT JOIN document_types d ON rd.document_id = d.document_id
       LEFT JOIN document_types dt ON r.document_id = dt.document_id
-      GROUP BY r.request_id, u.username, u.course, u.email, dt.name, c.registrar_status, c.guidance_status, c.engineering_status, c.criminology_status, c.mis_status, c.library_status, c.cashier_status
+      ${whereClause}
+      GROUP BY r.request_id, u.username, u.course, u.email, dt.name, 
+               c.registrar_status, c.guidance_status, c.engineering_status, 
+               c.criminology_status, c.mis_status, c.library_status, c.cashier_status
       ORDER BY r.submission_date DESC
-    `)
+    `, params);
 
-    res.status(200).json({ fetchRequests })
+    res.status(200).json({ fetchRequests });
   } catch (err) {
-    console.error("Error fetching requests:", err)
-    res.status(500).json({ error: "Failed to fetch requests", details: err.message })
+    console.error("Error fetching requests:", err);
+    res.status(500).json({ error: "Failed to fetch requests", details: err.message });
   }
-})
+});
+
 
 /* ==========================
    Request status update
