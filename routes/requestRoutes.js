@@ -1081,10 +1081,12 @@ router.put(
         "mis",
         "library",
         "cashier",
+        "business",
         "engineering",
         "criminology",
         "engineering and architecture",
         "criminal justice",
+        "business and technology",
       ];
       
       if (!validDepts.includes(department)) {
@@ -1095,6 +1097,7 @@ router.put(
       const deptMap = {
         "engineering and architecture": "engineering",
         "criminal justice": "criminology",
+        "business and technology": "business",
       };
       
       const dbDept = deptMap[department] || department;
@@ -1134,6 +1137,7 @@ router.put(
               mis_status = 'pending',
               library_status = 'pending',
               cashier_status = 'pending',
+              business_status = 'pending',
               engineering_status = 'pending',
               criminology_status = 'pending',
               registrar_reason = NULL,
@@ -1141,6 +1145,7 @@ router.put(
               mis_reason = NULL,
               library_reason = NULL,
               cashier_reason = NULL,
+              business_reason = NULL,
               engineering_reason = NULL,
               criminology_reason = NULL,
               registrar_approved_at = NULL,
@@ -1148,6 +1153,7 @@ router.put(
               mis_approved_at = NULL,
               library_approved_at = NULL,
               cashier_approved_at = NULL,
+              business_approved_at = NULL,
               engineering_approved_at = NULL,
               criminology_approved_at = NULL,
               registrar_rejected_at = NULL,
@@ -1155,9 +1161,11 @@ router.put(
               mis_rejected_at = NULL,
               library_rejected_at = NULL,
               cashier_rejected_at = NULL,
+              business_rejected_at = NULL,
               engineering_rejected_at = NULL,
               criminology_rejected_at = NULL,
-              clearance_expiry = NULL
+              clearance_expiry = NULL,
+              last_cleared = NULL
           WHERE student_id = ?
         `,
           [studentId]
@@ -1218,21 +1226,88 @@ router.put(
           .json({ message: "Failed to update clearance" });
       }
 
-      // Check if all departments are approved
+      // ✅ Check if ALL RELEVANT departments are approved (including course-specific ones)
       const [final] = await pool.query(checkQuery, [studentId]);
       const finalClearance = final[0];
 
-      const baseDepts = ["registrar", "guidance", "mis", "library", "cashier"];
-      const allApproved = baseDepts.every(
-        (d) => finalClearance[`${d}_status`] === "approved"
+      // Get student's course to determine which departments are relevant
+      const [studentInfo] = await pool.query(
+        "SELECT course FROM user WHERE uid = ?",
+        [studentId]
       );
+      
+      const studentCourse = (studentInfo[0]?.course || "").toLowerCase().trim();
+      
+      // Base departments everyone needs
+      const baseDepts = ["registrar", "guidance", "library", "cashier"];
+      
+      // Determine relevant departments based on course
+      let relevantDepts = [...baseDepts];
+      
+      // Computer courses need MIS
+      const computerCourses = [
+        "bachelor of science in information technology",
+        "bachelor of science in computer engineering",
+      ];
+      if (computerCourses.includes(studentCourse)) {
+        relevantDepts.push("mis");
+      }
+      
+      // Business courses need business dept
+      const businessCourses = [
+        "bachelor of science in accountancy",
+        "bachelor of science in accounting technology",
+        "bachelor of science in entrepreneurship",
+        "bachelor of science in information technology",
+      ];
+      if (businessCourses.includes(studentCourse)) {
+        relevantDepts.push("business");
+      }
+      
+      // Engineering courses need engineering dept
+      const engineeringCourses = [
+        "bachelor of science in architecture",
+        "bachelor of science in computer engineering",
+        "bachelor of science in civil engineering",
+        "bachelor of science in electronics engineering",
+        "bachelor of science in electrical engineering",
+        "bachelor of science in mechanical engineering",
+      ];
+      if (engineeringCourses.includes(studentCourse)) {
+        relevantDepts.push("engineering");
+      }
+      
+      // Criminology needs criminology dept
+      const criminalJusticeCourses = [
+        "bachelor of science in criminology",
+      ];
+      if (criminalJusticeCourses.includes(studentCourse)) {
+        relevantDepts.push("criminology");
+      }
+
+      // Check if all relevant departments are approved
+      console.log("=== CHECKING CLEARANCE COMPLETION ===");
+      console.log("Student course:", studentCourse);
+      console.log("Relevant departments:", relevantDepts);
+      
+      // Only check departments that exist in the clearance record
+      const allApproved = relevantDepts.every(
+        (d) => {
+          const status = finalClearance[`${d}_status`];
+          const isApproved = status && status.toLowerCase() === "approved";
+          console.log(`  ${d}_status: ${status || 'NULL'} -> ${isApproved ? '✓' : '✗'}`);
+          return isApproved;
+        }
+      );
+      
+      console.log("All approved?", allApproved);
 
       if (allApproved) {
         console.log(
-          `All base departments approved! Setting expiry for student ${studentId} to 6 months from now`
+          `All relevant departments approved for student ${studentId}! Setting expiry to 6 months from now`
         );
         
-        // Set expiry to 6 months from today (not from the current time)
+        // Set expiry to 6 months from today
         const expiryDate = new Date();
         expiryDate.setMonth(expiryDate.getMonth() + 6);
         
@@ -1246,13 +1321,23 @@ router.put(
           [expiryDate, studentId]
         );
         
-        console.log(`Expiry date set to: ${expiryDate.toISOString()}`);
+        console.log(`✅ Clearance expiry set to: ${expiryDate.toISOString()}`);
+        console.log(`Valid for 6 months until: ${expiryDate.toLocaleDateString()}`);
+      } else {
+        console.log(`Not all departments approved yet. Relevant depts: ${relevantDepts.join(', ')}`);
+        relevantDepts.forEach(d => {
+          console.log(`  ${d}: ${finalClearance[`${d}_status`] || 'pending'}`);
+        });
       }
 
       console.log(
         `Successfully updated ${dbDept} clearance for student ${studentId}`
       );
-      res.json({ message: "Clearance updated successfully" });
+      res.json({ 
+        message: "Clearance updated successfully",
+        allApproved: allApproved,
+        expirySet: allApproved
+      });
     } catch (error) {
       console.error("Error updating clearance:", error);
       res
