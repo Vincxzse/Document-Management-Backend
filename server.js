@@ -3,22 +3,14 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-
 import authRoutes from "./routes/authRoutes.js";
 import requestRoutes from "./routes/requestRoutes.js";
 import pool from "./database/db.js";
 
 dotenv.config();
 
-console.log("Railway ENV Check:", process.env.BREVO_API_KEY ? "FOUND ✅" : "MISSING ❌");
-console.log("All ENV keys:", Object.keys(process.env));
-
-// ✅ Test if Railway is passing your BREVO_API_KEY
-console.log("ENV TEST:", process.env.BREVO_API_KEY ? "FOUND ✅" : "MISSING ❌");
-
 const app = express();
 const port = process.env.PORT || 5000;
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -26,20 +18,18 @@ const __dirname = path.dirname(__filename);
 // CORS Configuration
 // -------------------
 const allowedOrigins = [
-  "https://mydocurequest.bhc1979.com", // deployed frontend
-  "http://localhost:5173" // local dev
+  "https://mydocurequest.bhc1979.com",
+  "http://localhost:5173"
 ];
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
-
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     } else {
       console.warn(`Blocked by CORS: ${origin}`);
-      return callback(null, false); // <-- just block it instead of throwing error
+      return callback(null, false);
     }
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -52,7 +42,33 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use("/attachments", express.static(path.join(__dirname, "attachments")));
+// -------------------
+// Static Files with CORS headers
+// -------------------
+app.use("/attachments", (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+}, express.static(path.join(__dirname, "attachments")));
+
+// -------------------
+// CSP Headers for API routes only
+// -------------------
+app.use((req, res, next) => {
+  // Skip CSP for static files
+  if (req.path.startsWith('/attachments')) {
+    return next();
+  }
+  
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; " +
+    "img-src 'self' data: https: blob:; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval';"
+  );
+  next();
+});
 
 // -------------------
 // Routes
@@ -61,7 +77,7 @@ app.use(authRoutes);
 app.use(requestRoutes);
 
 // -------------------
-// Optional test route for DB
+// Test routes
 // -------------------
 app.get("/api/test-db", async (req, res) => {
   try {
@@ -72,9 +88,6 @@ app.get("/api/test-db", async (req, res) => {
   }
 });
 
-// -------------------
-// Test route for Brevo API key
-// -------------------
 app.get("/test-brevo", (req, res) => {
   if (process.env.BREVO_API_KEY) {
     res.json({ success: true, keyLength: process.env.BREVO_API_KEY.length });
