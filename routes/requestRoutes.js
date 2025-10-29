@@ -526,6 +526,7 @@ router.get("/get-requests", async (req, res) => {
         r.reference_no,
         r.amount,
         r.rejection_reason,
+        r.reason,
         DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
         DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
         CASE 
