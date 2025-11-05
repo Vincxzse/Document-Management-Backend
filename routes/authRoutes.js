@@ -5,6 +5,7 @@ import validator from "validator"
 import multer from 'multer'
 import path from 'path'
 import { sendVerificationEmail } from '../email/brevo.js'
+console.log("Checking sendVerificationEmail type:", typeof sendVerificationEmail);
 import { sendNotificationSMS } from '../services/smsService.js'
 
 const verificationStore = {}
@@ -25,6 +26,9 @@ const upload = multer({ storage })
 router.post("/register-account", async (req, res) => {
     try {
         let { email, username, phone, password, course, role, studentNumber } = req.body
+        console.log("📩 Register route triggered for:", email);
+        console.log("🟢 Calling sendVerificationEmail...");
+
         email = email.toLowerCase()
         username = username.trim()
         const saltRounds = 10
@@ -45,23 +49,22 @@ router.post("/register-account", async (req, res) => {
         ) {
             return res.status(400).json({ message: "Password is too weak. It must be at least 8 characters long and include uppercase, lowercase, number, and symbol.", })
         }
-        if (role === "student") {
-            const verifCode = Math.floor(100000 + Math.random() * 900000)
-            verificationStore[email] = {
-                verifCode,
-                username,
-                phone,
-                studentNumber,
-                course,
-                role,
-                hashedPassword,
-                expiresAt: Date.now() + 5 * 60 * 1000
-            }
-            await sendVerificationEmail(email, verifCode)
-            return res.status(201).json({ message: "Verification code sent. Please check your email" })
-        } else if (role === "alumni") {
-            return res.status(201).json({ message: "Redirecting to alumni confirmation" })
+        const verifCode = Math.floor(100000 + Math.random() * 900000)
+        verificationStore[email] = {
+            verifCode,
+            username,
+            phone,
+            studentNumber,
+            course,
+            role,
+            hashedPassword,
+            expiresAt: Date.now() + 5 * 60 * 1000
         }
+        console.log("📩 Register route triggered for:", email)
+        console.log("🧩 Checking if user already exists:", findUser.length);
+        await sendVerificationEmail(email, verifCode)
+        console.log("✅ sendVerificationEmail() finished");
+        return res.status(201).json({ message: "Verification code sent. Please check your email" })
     } catch (err) {
         console.error(err.message)
         return res.status(500).json({ error: "Internal server error" })

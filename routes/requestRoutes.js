@@ -786,70 +786,72 @@ router.delete("/remove-from-cart/:item_id", async (req, res) => {
 
 router.post("/checkout", async (req, res) => {
   try {
-    const { user_id, selected_items } = req.body;
+    const { user_id, items } = req.body;
 
-    if (!user_id || !selected_items || selected_items.length === 0) {
+    if (!user_id || !items || items.length === 0) {
       return res.status(400).json({ message: "Invalid checkout data" });
     }
 
-    // Fetch cart items to get document info
-    const [cartItems] = await pool.query(
-      "SELECT * FROM document_cart WHERE user_id = ? AND item_id IN (?)",
-      [user_id, selected_items]
-    );
-
-    if (cartItems.length === 0) {
-      return res.status(404).json({ message: "No cart items found" });
-    }
-
-    // Extract unique document IDs and get their fees
-    const documentIds = cartItems.map(item => item.doc_id);
+    // Extract document IDs from items
+    const documentIds = items.map(item => item.document_id || item.doc_id);
+    
+    // ✅ Get document fees AND names from document_types table
     const [documents] = await pool.query(
-      "SELECT document_id, fee FROM document_types WHERE document_id IN (?)",
+      "SELECT document_id, fee, name FROM document_types WHERE document_id IN (?)",
       [documentIds]
     );
 
     // Calculate total amount
     const totalAmount = documents.reduce((sum, doc) => sum + parseFloat(doc.fee || 0), 0);
 
+    // ✅ Use doc_name from items (already provided by cart query)
+    // Fallback to name from documents table if not present
+    const reasonsList = items.map(item => {
+      const doc = documents.find(d => d.document_id === (item.document_id || item.doc_id));
+      const docName = item.doc_name || doc?.name || 'Document';
+      return `${docName}: ${item.reason || 'No reason provided'}`;
+    }).join('; ');
+
     // Create ONE request for all documents
     const submission_date = new Date().toISOString();
     const [result] = await pool.query(
       `INSERT INTO requests 
-       (student_id, document_ids, payment, status, submission_date, amount) 
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       (student_id, document_ids, payment, status, submission_date, amount, reason) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         user_id,
-        JSON.stringify(documentIds), // Store all document IDs as JSON array
+        JSON.stringify(documentIds),
         "pending",
         "Pending",
         submission_date,
-        totalAmount.toFixed(2)
+        totalAmount.toFixed(2),
+        reasonsList
       ]
     );
 
     const requestId = result.insertId;
 
-    // Option: If using junction table instead
     // Insert into request_documents junction table
-    for (const docId of documentIds) {
+    for (const item of items) {
       await pool.query(
         "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
-        [requestId, docId]
+        [requestId, item.document_id || item.doc_id]
       );
     }
 
-    // Remove items from cart
+    // Remove items from cart using item_ids from the items array
+    const itemIds = items.map(item => item.item_id);
     await pool.query(
       "DELETE FROM document_cart WHERE user_id = ? AND item_id IN (?)",
-      [user_id, selected_items]
+      [user_id, itemIds]
     );
 
     res.json({
       message: "Checkout successful! One request created for all documents.",
       request_id: requestId,
       total_documents: documentIds.length,
-      total_amount: totalAmount.toFixed(2)
+      total_amount: totalAmount.toFixed(2),
+      reasons: reasonsList
     });
 
   } catch (error) {
