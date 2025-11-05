@@ -5,6 +5,7 @@ import validator from "validator"
 import multer from 'multer'
 import path from 'path'
 import { sendVerificationEmail } from '../email/brevo.js'
+import { sendNotificationSMS } from '../services/smsService.js'
 
 const verificationStore = {}
 
@@ -23,7 +24,7 @@ const upload = multer({ storage })
 
 router.post("/register-account", async (req, res) => {
     try {
-        let { email, username, password, course, role, studentNumber } = req.body
+        let { email, username, phone, password, course, role, studentNumber } = req.body
         email = email.toLowerCase()
         username = username.trim()
         const saltRounds = 10
@@ -49,6 +50,7 @@ router.post("/register-account", async (req, res) => {
             verificationStore[email] = {
                 verifCode,
                 username,
+                phone,
                 studentNumber,
                 course,
                 role,
@@ -77,16 +79,26 @@ router.post("/register/verify", async(req, res) => {
     if (entry.verifCode != code) {
         return res.status(400).json({ message: "Invalid code" })
     }
-    const { username, studentNumber, hashedPassword, course, role } = entry
+    const { username, phone, studentNumber, hashedPassword, course, role } = entry
     const [result] = await pool.query(
-        "INSERT INTO user (email, username, student_number, password, course, role) VALUES (?, ?, ?, ?, ?, ?)",
-        [email, username, studentNumber, hashedPassword, course, role]
+        "INSERT INTO user (email, username, phone, student_number, password, course, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [email, username, phone, studentNumber, hashedPassword, course, role]
     )
     const userId = result.insertId
     await pool.query(
         "INSERT INTO clearances (user_id, cashier_status) VALUES (?, ?)",
         [userId, 'Pending']
     )
+
+    if (phone && phone.trim() !== "") {
+        const formattedPhone = phone.replace(/^0/, '63')
+        try {
+            await sendNotificationSMS(formattedPhone, `Hi ${username}, your phone registration is complete!`)
+            console.log(`SMS sent to ${formattedPhone}`)
+        } catch (smsError) {
+            console.error("SMS sending failed: ", smsError.message)
+        }
+    }
     delete verificationStore[email]
     return res.status(201).json({ message: "Account Created Successfully", userId })
 })
