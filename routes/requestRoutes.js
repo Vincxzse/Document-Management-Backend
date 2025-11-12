@@ -1,6 +1,7 @@
 import express from 'express'
 import pool from '../database/db.js'
 import bcrypt from 'bcryptjs'
+import { sendSMS } from '../services/smsService.js'
 
 const router = express.Router()
 
@@ -88,14 +89,51 @@ async function updateClearanceRow(requestId, department, status, reason) {
 router.post('/reject-req/:request_id', async (req, res) => {
   const { request_id } = req.params
   const { reason } = req.body
+  
   try {
+    // Get request details and student info for SMS
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username, d.name as document_name
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       LEFT JOIN document_types d ON r.document_id = d.document_id
+       WHERE r.request_id = ?`,
+      [request_id]
+    )
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ error: "Request not found" })
+    }
+
+    const request = requestData[0]
+
+    // Update request with rejection reason
     const [result] = await pool.query(
       "UPDATE requests SET request_rejection = ?, status = 'rejected' WHERE request_id = ?",
       [reason, request_id]
     )
 
-    if (result.affectedRows === 0) return res.status(404).json({ error: "Request not found" })
-    res.json({ message: "Request rejected successfully", requestId: request_id, reason })
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Request not found" })
+    }
+
+    // Send SMS notification with rejection reason
+    if (request.phone) {
+      const smsMessage = `Hi ${request.username}, your document request #${request_id} for "${request.document_name}" has been rejected. Reason: ${reason}. Please contact BHC registrar for assistance.`
+      
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err);
+        // Don't fail the request if SMS fails
+      });
+      console.log(`✅ Request rejection SMS sent to ${request.phone}`);
+    }
+
+    res.json({ 
+      message: "Request rejected successfully", 
+      requestId: request_id, 
+      reason,
+      smsSent: !!request.phone 
+    })
   } catch (error) {
     console.error(error)
     res.status(500).json({ error: "Internal server error" })
@@ -176,6 +214,22 @@ router.put("/approve-payment/:request_id", async (req, res) => {
   try {
     const { request_id } = req.params;
 
+    // Get request and user info for SMS
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username 
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       WHERE r.request_id = ?`,
+      [request_id]
+    );
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    const request = requestData[0];
+
+    // Update payment status
     const [result] = await pool.query(
       `UPDATE requests SET payment = 'approved', status = 'in progress' 
        WHERE request_id = ?`,
@@ -186,7 +240,20 @@ router.put("/approve-payment/:request_id", async (req, res) => {
       return res.status(404).json({ message: "Request not found" });
     }
 
-    res.json({ message: "Payment approved for all documents in this request" });
+    // Send SMS notification
+    if (request.phone) {
+      const smsMessage = `Hi ${request.username}, your payment for request #${request_id} has been approved by BHC Cashier. Your clearance process can now proceed.`;
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err);
+        // Don't fail the request if SMS fails
+      });
+      console.log(`✅ Payment approval SMS sent to ${request.phone}`);
+    }
+
+    res.json({ 
+      message: "Payment approved for all documents in this request",
+      smsSent: !!request.phone 
+    });
 
   } catch (error) {
     console.error("Approve payment error:", error);
@@ -205,6 +272,26 @@ router.put("/reject-payment/:request_id", async (req, res) => {
     const { request_id } = req.params;
     const { reason } = req.body;
 
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: "Rejection reason is required" });
+    }
+
+    // Get request and user info for SMS
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username 
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       WHERE r.request_id = ?`,
+      [request_id]
+    );
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    const request = requestData[0];
+
+    // Update payment status
     const [result] = await pool.query(
       `UPDATE requests 
        SET payment = 'rejected', rejection_reason = ?
@@ -216,13 +303,195 @@ router.put("/reject-payment/:request_id", async (req, res) => {
       return res.status(404).json({ message: "Request not found" });
     }
 
-    res.json({ message: "Payment rejected" });
+    // Send SMS notification
+    if (request.phone) {
+      const smsMessage = `Hi ${request.username}, your payment for request #${request_id} was rejected. Reason: ${reason}. Please contact BHC Cashier for assistance.`;
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err);
+        // Don't fail the request if SMS fails
+      });
+      console.log(`✅ Payment rejection SMS sent to ${request.phone}`);
+    }
+
+    res.json({ 
+      message: "Payment rejected",
+      smsSent: !!request.phone 
+    });
 
   } catch (error) {
     console.error("Reject payment error:", error);
     res.status(500).json({
       message: "Failed to reject payment",
       details: error.message
+    });
+  }
+});
+
+router.post("/api/check-clearance-completion/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    
+    console.log("=== CHECKING CLEARANCE COMPLETION ===");
+    console.log("Student ID:", studentId);
+    
+    // Get student clearance data with user info
+    const [clearanceData] = await pool.query(
+      `SELECT sc.*, u.phone, u.username, u.course, u.role, u.email
+       FROM student_clearance sc
+       JOIN user u ON sc.student_id = u.uid
+       WHERE sc.student_id = ?`,
+      [studentId]
+    );
+
+    if (clearanceData.length === 0) {
+      return res.status(404).json({ message: "Clearance not found" });
+    }
+
+    const clearance = clearanceData[0];
+    const courseLower = (clearance.course || "").toLowerCase().trim();
+    const studentRole = (clearance.role || "").toLowerCase();
+
+    console.log("Student role:", studentRole);
+    console.log("Student course:", courseLower);
+
+    // Alumni only need registrar and cashier
+    if (studentRole === "alumni") {
+      console.log("Checking alumni clearance...");
+      const alumniComplete = 
+        clearance.registrar_status === "approved" && 
+        clearance.cashier_status === "approved";
+
+      console.log("Registrar:", clearance.registrar_status);
+      console.log("Cashier:", clearance.cashier_status);
+      console.log("Alumni complete:", alumniComplete);
+
+      if (alumniComplete && clearance.phone) {
+        // Check if we've already sent notification
+        const [notifCheck] = await pool.query(
+          "SELECT * FROM clearance_notifications WHERE student_id = ? AND notification_type = 'clearance_complete'",
+          [studentId]
+        );
+
+        if (notifCheck.length === 0) {
+          const smsMessage = `Hi ${clearance.username}, congratulations! Your BHC clearance is now complete. You may now proceed with your document request.`;
+          await sendSMS(clearance.phone, smsMessage).catch(err => {
+            console.error("SMS sending failed:", err);
+          });
+          
+          // Record notification sent
+          await pool.query(
+            "INSERT INTO clearance_notifications (student_id, notification_type, sent_at) VALUES (?, 'clearance_complete', NOW())",
+            [studentId]
+          );
+          
+          console.log(`✅ Alumni clearance completion SMS sent to ${clearance.phone}`);
+          return res.status(200).json({ 
+            message: "Clearance complete notification sent",
+            allApproved: true,
+            smsSent: true 
+          });
+        } else {
+          console.log("SMS already sent previously");
+        }
+      }
+
+      return res.status(200).json({ 
+        allApproved: alumniComplete,
+        smsSent: false 
+      });
+    }
+
+    // Regular students - check all required departments based on course
+    const misCourses = [
+      "bachelor of science in accountancy",
+      "bachelor of science in accounting technology",
+      "bachelor of science in entrepreneurship",
+      "bachelor of science in information technology",
+      "bachelor of science in computer engineering",
+    ];
+    
+    const engineeringCourses = [
+      "bachelor of science in architecture",
+      "bachelor of science in civil engineering",
+      "bachelor of science in electronics engineering",
+      "bachelor of science in electrical engineering",
+      "bachelor of science in mechanical engineering",
+    ];
+    
+    const criminologyCourses = [
+      "bachelor of science in criminology",
+    ];
+
+    // Base departments for all students
+    const baseDepts = ["registrar", "guidance", "library", "cashier"];
+    let allApproved = baseDepts.every(dept => {
+      const status = clearance[`${dept}_status`];
+      console.log(`  ${dept}_status: ${status}`);
+      return status === "approved";
+    });
+
+    console.log("Base departments approved:", allApproved);
+
+    // Check program head clearance
+    if (allApproved) {
+      if (misCourses.includes(courseLower)) {
+        console.log("Checking MIS clearance...");
+        allApproved = clearance.mis_status === "approved";
+        console.log("  mis_status:", clearance.mis_status);
+      } else if (engineeringCourses.includes(courseLower)) {
+        console.log("Checking Engineering clearance...");
+        allApproved = clearance.engineering_status === "approved";
+        console.log("  engineering_status:", clearance.engineering_status);
+      } else if (criminologyCourses.includes(courseLower)) {
+        console.log("Checking Criminology clearance...");
+        allApproved = clearance.criminology_status === "approved";
+        console.log("  criminology_status:", clearance.criminology_status);
+      }
+    }
+
+    console.log("All required departments approved:", allApproved);
+
+    // If all approved and phone exists, send SMS
+    if (allApproved && clearance.phone) {
+      // Check if we've already sent notification
+      const [notifCheck] = await pool.query(
+        "SELECT * FROM clearance_notifications WHERE student_id = ? AND notification_type = 'clearance_complete'",
+        [studentId]
+      );
+
+      if (notifCheck.length === 0) {
+        const smsMessage = `Hi ${clearance.username}, congratulations! Your BHC clearance is now complete. You may now proceed with your document request.`;
+        await sendSMS(clearance.phone, smsMessage).catch(err => {
+          console.error("SMS sending failed:", err);
+        });
+        
+        // Record notification sent
+        await pool.query(
+          "INSERT INTO clearance_notifications (student_id, notification_type, sent_at) VALUES (?, 'clearance_complete', NOW())",
+          [studentId]
+        );
+        
+        console.log(`✅ Clearance completion SMS sent to ${clearance.phone}`);
+        return res.status(200).json({ 
+          message: "Clearance complete notification sent",
+          allApproved: true,
+          smsSent: true 
+        });
+      } else {
+        console.log("SMS already sent previously");
+      }
+    }
+
+    return res.status(200).json({ 
+      allApproved,
+      smsSent: false 
+    });
+
+  } catch (error) {
+    console.error("Error checking clearance completion:", error);
+    return res.status(500).json({ 
+      message: "Internal server error",
+      details: error.message 
     });
   }
 });
@@ -554,7 +823,7 @@ router.get("/get-requests", async (req, res) => {
       GROUP BY r.request_id, u.username, u.course, u.email, dt.name, 
                c.registrar_status, c.guidance_status, c.engineering_status, 
                c.criminology_status, c.mis_status, c.library_status, c.cashier_status
-      ORDER BY r.submission_date DESC
+      ORDER BY r.request_id DESC
     `, params);
 
     res.status(200).json({ fetchRequests });
@@ -573,8 +842,50 @@ router.put("/request-status/:id", async (req, res) => {
   const { status } = req.body
 
   try {
+    // Get request details and student info for SMS
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username, d.name as document_name
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       LEFT JOIN document_types d ON r.document_id = d.document_id
+       WHERE r.request_id = ?`,
+      [id]
+    )
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ error: "Request not found" })
+    }
+
+    const request = requestData[0]
+
+    // Update request status
     await pool.query("UPDATE requests SET status = ? WHERE request_id = ?", [status, id])
-    res.json({ message: "Action successful" })
+
+    // Send SMS notification based on status
+    if (request.phone) {
+      let smsMessage = ""
+      
+      if (status.toLowerCase() === "approved") {
+        smsMessage = `Hi ${request.username}, your document request #${id} for "${request.document_name}" has been approved by BHC. You will be notified when it's ready for pickup.`
+      } else if (status.toLowerCase() === "rejected") {
+        smsMessage = `Hi ${request.username}, your document request #${id} for "${request.document_name}" has been rejected. Please contact the registrar's office for more information.`
+      } else if (status.toLowerCase() === "ready for pickup" || status.toLowerCase() === "completed") {
+        smsMessage = `Hi ${request.username}, your requested document "${request.document_name}" (Request #${id}) is now ready for pickup at BHC. Please bring a valid ID.`
+      }
+
+      if (smsMessage) {
+        await sendSMS(request.phone, smsMessage).catch(err => {
+          console.error("SMS sending failed:", err);
+          // Don't fail the request if SMS fails
+        });
+        console.log(`✅ Request ${status} SMS sent to ${request.phone}`);
+      }
+    }
+
+    res.json({ 
+      message: "Action successful",
+      smsSent: !!request.phone 
+    })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Failed to create the action" })
@@ -1077,7 +1388,7 @@ router.put(
 
       console.log(`Updating clearance - Student: ${studentId}, Dept: ${department}, Status: ${status}`);
 
-      // Validate department - accept both names and database field names
+      // Validate department
       const validDepts = [
         "registrar",
         "guidance",
@@ -1123,18 +1434,15 @@ router.put(
         );
       }
 
-      // Fetch the latest record after ensuring it exists
+      // Fetch the latest record
       const [updatedRecord] = await pool.query(checkQuery, [studentId]);
       const clearance = updatedRecord[0];
 
       // Reset expired clearance if needed
       if (isClearanceExpired(clearance.clearance_expiry)) {
-        console.log(
-          `Resetting expired clearance for student ${studentId}`
-        );
+        console.log(`Resetting expired clearance for student ${studentId}`);
         await pool.query(
-          `
-          UPDATE student_clearance 
+          `UPDATE student_clearance 
           SET registrar_status = 'pending',
               guidance_status = 'pending',
               mis_status = 'pending',
@@ -1169,8 +1477,7 @@ router.put(
               criminology_rejected_at = NULL,
               clearance_expiry = NULL,
               last_cleared = NULL
-          WHERE student_id = ?
-        `,
+          WHERE student_id = ?`,
           [studentId]
         );
       }
@@ -1193,7 +1500,6 @@ router.put(
           WHERE student_id = ?
         `;
         params = [status, studentId];
-        console.log(`Setting ${statusField} = ${status}, ${approvedAtField} = NOW()`);
       } else if (status === "rejected") {
         updateQuery = `
           UPDATE student_clearance 
@@ -1204,7 +1510,6 @@ router.put(
           WHERE student_id = ?
         `;
         params = [status, reason || null, studentId];
-        console.log(`Setting ${statusField} = ${status}, ${rejectedAtField} = NOW()`);
       } else {
         updateQuery = `
           UPDATE student_clearance 
@@ -1215,127 +1520,99 @@ router.put(
           WHERE student_id = ?
         `;
         params = [status, studentId];
-        console.log(`Setting ${statusField} = ${status}`);
       }
-
-      console.log("Update query:", updateQuery);
-      console.log("Params:", params);
 
       const [updateResult] = await pool.query(updateQuery, params);
 
       if (updateResult.affectedRows === 0) {
-        return res
-          .status(500)
-          .json({ message: "Failed to update clearance" });
+        return res.status(500).json({ message: "Failed to update clearance" });
       }
 
-      // ✅ Check if ALL RELEVANT departments are approved (including course-specific ones)
+      // Check if all relevant departments are approved
       const [final] = await pool.query(checkQuery, [studentId]);
       const finalClearance = final[0];
 
-      // Get student's course to determine which departments are relevant
       const [studentInfo] = await pool.query(
-        "SELECT course FROM user WHERE uid = ?",
+        "SELECT course, role FROM user WHERE uid = ?",
         [studentId]
       );
       
       const studentCourse = (studentInfo[0]?.course || "").toLowerCase().trim();
+      const studentRole = (studentInfo[0]?.role || "").toLowerCase();
       
-      // Base departments everyone needs
-      const baseDepts = ["registrar", "guidance", "library", "cashier"];
-      
-      // Determine relevant departments based on course
-      let relevantDepts = [...baseDepts];
-      
-      // Computer courses need MIS
-      const computerCourses = [
-        "bachelor of science in information technology",
-        "bachelor of science in computer engineering",
-      ];
-      if (computerCourses.includes(studentCourse)) {
-        relevantDepts.push("mis");
-      }
-      
-      // Business courses need business dept
-      const businessCourses = [
-        "bachelor of science in accountancy",
-        "bachelor of science in accounting technology",
-        "bachelor of science in entrepreneurship",
-        "bachelor of science in information technology",
-      ];
-      if (businessCourses.includes(studentCourse)) {
-        relevantDepts.push("business");
-      }
-      
-      // Engineering courses need engineering dept
-      const engineeringCourses = [
-        "bachelor of science in architecture",
-        "bachelor of science in computer engineering",
-        "bachelor of science in civil engineering",
-        "bachelor of science in electronics engineering",
-        "bachelor of science in electrical engineering",
-        "bachelor of science in mechanical engineering",
-      ];
-      if (engineeringCourses.includes(studentCourse)) {
-        relevantDepts.push("engineering");
-      }
-      
-      // Criminology needs criminology dept
-      const criminalJusticeCourses = [
-        "bachelor of science in criminology",
-      ];
-      if (criminalJusticeCourses.includes(studentCourse)) {
-        relevantDepts.push("criminology");
-      }
+      let allApproved = false;
 
-      // Check if all relevant departments are approved
-      console.log("=== CHECKING CLEARANCE COMPLETION ===");
-      console.log("Student course:", studentCourse);
-      console.log("Relevant departments:", relevantDepts);
-      
-      // Only check departments that exist in the clearance record
-      const allApproved = relevantDepts.every(
-        (d) => {
-          const status = finalClearance[`${d}_status`];
-          const isApproved = status && status.toLowerCase() === "approved";
-          console.log(`  ${d}_status: ${status || 'NULL'} -> ${isApproved ? '✓' : '✗'}`);
-          return isApproved;
+      // Alumni check
+      if (studentRole === "alumni") {
+        allApproved = 
+          finalClearance.registrar_status === "approved" && 
+          finalClearance.cashier_status === "approved";
+      } else {
+        // Regular students - base departments
+        const baseDepts = ["registrar", "guidance", "library", "cashier"];
+        allApproved = baseDepts.every(d => 
+          finalClearance[`${d}_status`] === "approved"
+        );
+
+        // Check program head clearance
+        if (allApproved) {
+          const misCourses = [
+            "bachelor of science in accountancy",
+            "bachelor of science in accounting technology",
+            "bachelor of science in entrepreneurship",
+            "bachelor of science in information technology",
+            "bachelor of science in computer engineering",
+          ];
+          
+          const engineeringCourses = [
+            "bachelor of science in architecture",
+            "bachelor of science in civil engineering",
+            "bachelor of science in electronics engineering",
+            "bachelor of science in electrical engineering",
+            "bachelor of science in mechanical engineering",
+          ];
+          
+          const criminologyCourses = ["bachelor of science in criminology"];
+
+          if (misCourses.includes(studentCourse)) {
+            allApproved = finalClearance.mis_status === "approved";
+          } else if (engineeringCourses.includes(studentCourse)) {
+            allApproved = finalClearance.engineering_status === "approved";
+          } else if (criminologyCourses.includes(studentCourse)) {
+            allApproved = finalClearance.criminology_status === "approved";
+          }
         }
-      );
-      
-      console.log("All approved?", allApproved);
+      }
 
       if (allApproved) {
-        console.log(
-          `All relevant departments approved for student ${studentId}! Setting expiry to 6 months from now`
-        );
+        console.log(`All relevant departments approved for student ${studentId}! Setting expiry to 6 months`);
         
-        // Set expiry to 6 months from today
         const expiryDate = new Date();
         expiryDate.setMonth(expiryDate.getMonth() + 6);
         
         await pool.query(
-          `
-          UPDATE student_clearance 
+          `UPDATE student_clearance 
           SET last_cleared = NOW(),
               clearance_expiry = ?
-          WHERE student_id = ?
-        `,
+          WHERE student_id = ?`,
           [expiryDate, studentId]
         );
         
         console.log(`✅ Clearance expiry set to: ${expiryDate.toISOString()}`);
-        console.log(`Valid for 6 months until: ${expiryDate.toLocaleDateString()}`);
-      } else {
-        console.log(`Not all departments approved yet. Relevant depts: ${relevantDepts.join(', ')}`);
-        relevantDepts.forEach(d => {
-          console.log(`  ${d}: ${finalClearance[`${d}_status`] || 'pending'}`);
-        });
+
+        // NEW: Trigger SMS notification check
+        if (status === "approved") {
+          // Trigger the completion check in the background
+          // Use a separate request to avoid blocking this response
+          fetch(`http://localhost:${process.env.PORT || 3000}/api/check-clearance-completion/${studentId}`, {
+            method: 'POST',
+          }).catch(err => {
+            console.error("Failed to trigger SMS check:", err);
+          });
+        }
       }
 
-      console.log(
-        `Successfully updated ${dbDept} clearance for student ${studentId}`
-      );
+      console.log(`Successfully updated ${dbDept} clearance for student ${studentId}`);
       res.json({ 
         message: "Clearance updated successfully",
         allApproved: allApproved,
@@ -1343,12 +1620,10 @@ router.put(
       });
     } catch (error) {
       console.error("Error updating clearance:", error);
-      res
-        .status(500)
-        .json({
-          message: "Failed to update clearance",
-          details: error.message,
-        });
+      res.status(500).json({
+        message: "Failed to update clearance",
+        details: error.message,
+      });
     }
   }
 );

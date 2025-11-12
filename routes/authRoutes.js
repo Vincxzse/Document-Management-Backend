@@ -5,8 +5,7 @@ import validator from "validator"
 import multer from 'multer'
 import path from 'path'
 import { sendVerificationEmail } from '../email/brevo.js'
-console.log("Checking sendVerificationEmail type:", typeof sendVerificationEmail);
-import { sendNotificationSMS } from '../services/smsService.js'
+import { sendSMS } from "../services/smsService.js"
 
 const verificationStore = {}
 
@@ -26,8 +25,8 @@ const upload = multer({ storage })
 router.post("/register-account", async (req, res) => {
     try {
         let { email, username, phone, password, course, role, studentNumber } = req.body
-        console.log("📩 Register route triggered for:", email);
-        console.log("🟢 Calling sendVerificationEmail...");
+        console.log("📩 Register route triggered for:", email)
+        console.log("🟢 Calling sendVerificationEmail...")
 
         email = email.toLowerCase()
         username = username.trim()
@@ -61,9 +60,9 @@ router.post("/register-account", async (req, res) => {
             expiresAt: Date.now() + 5 * 60 * 1000
         }
         console.log("📩 Register route triggered for:", email)
-        console.log("🧩 Checking if user already exists:", findUser.length);
+        console.log("🧩 Checking if user already exists:", findUser.length)
         await sendVerificationEmail(email, verifCode)
-        console.log("✅ sendVerificationEmail() finished");
+        console.log("✅ sendVerificationEmail() finished")
         return res.status(201).json({ message: "Verification code sent. Please check your email" })
     } catch (err) {
         console.error(err.message)
@@ -72,38 +71,37 @@ router.post("/register-account", async (req, res) => {
 })
 
 router.post("/register/verify", async(req, res) => {
-    const { email, code } = req.body
-    const entry = verificationStore[email]
-    if (!entry) return res.status(400).json({ message: "No verification request found" })
-    if (entry.expiresAt < Date.now()) {
-        delete verificationStore[email]
-        return res.status(400).json({ message: "Verification code expired." })
-    }
-    if (entry.verifCode != code) {
-        return res.status(400).json({ message: "Invalid code" })
-    }
-    const { username, phone, studentNumber, hashedPassword, course, role } = entry
-    const [result] = await pool.query(
-        "INSERT INTO user (email, username, phone, student_number, password, course, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [email, username, phone, studentNumber, hashedPassword, course, role]
-    )
-    const userId = result.insertId
-    await pool.query(
-        "INSERT INTO clearances (user_id, cashier_status) VALUES (?, ?)",
-        [userId, 'Pending']
-    )
-
-    if (phone && phone.trim() !== "") {
-        const formattedPhone = phone.replace(/^0/, '63')
-        try {
-            await sendNotificationSMS(formattedPhone, `Hi ${username}, your phone registration is complete!`)
-            console.log(`SMS sent to ${formattedPhone}`)
-        } catch (smsError) {
-            console.error("SMS sending failed: ", smsError.message)
+    try {
+        const { email, code } = req.body
+        const entry = verificationStore[email]
+        if (!entry) return res.status(400).json({ message: "No verification request found" })
+        if (entry.expiresAt < Date.now()) {
+            delete verificationStore[email]
+            return res.status(400).json({ message: "Verification code expired." })
         }
+        if (entry.verifCode != code) {
+            return res.status(400).json({ message: "Invalid code" })
+        }
+        const { username, phone, studentNumber, hashedPassword, course, role } = entry
+        const [result] = await pool.query(
+            "INSERT INTO user (email, username, phone, student_number, password, course, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [email, username, phone, studentNumber, hashedPassword, course, role]
+        )
+        const userId = result.insertId
+        await pool.query(
+            "INSERT INTO clearances (user_id, cashier_status) VALUES (?, ?)",
+            [userId, 'Pending']
+        )
+        if (phone) {
+            const smsMessage = `Hi ${username}, your account for Bataan Heroes College - (Document Request) has been successfully created!`
+            await sendSMS(phone, smsMessage)
+        }
+        delete verificationStore[email]
+        return res.status(201).json({ message: "Account Created Successfully", userId })
+    } catch (err) {
+        console.error("Error creating user:", err.message)
+        return res.status(500).json({ error: "Internal server error" })
     }
-    delete verificationStore[email]
-    return res.status(201).json({ message: "Account Created Successfully", userId })
 })
 
 router.post("/login", async (req, res) => {
@@ -155,20 +153,20 @@ router.post("/upload-file", upload.single("file"), async (req, res) => {
     try {
         const { request_id, reference_number, amount_sent } = req.body
 
-        console.log("=== UPLOAD DEBUG ===");
-        console.log("request_id:", request_id);
-        console.log("reference_number:", reference_number);
-        console.log("amount_sent:", amount_sent);
-        console.log("file:", req.file);
+        console.log("=== UPLOAD DEBUG ===")
+        console.log("request_id:", request_id)
+        console.log("reference_number:", reference_number)
+        console.log("amount_sent:", amount_sent)
+        console.log("file:", req.file)
 
         if (!req.file) {
-        console.error("No file uploaded");
-        return res.status(400).json({ message: "No file uploaded" });
+        console.error("No file uploaded")
+        return res.status(400).json({ message: "No file uploaded" })
         }
 
         if (!request_id) {
-        console.error("No request_id provided");
-        return res.status(400).json({ message: "request_id is required" });
+        console.error("No request_id provided")
+        return res.status(400).json({ message: "request_id is required" })
         }
 
         console.log("Updating request with:", {
@@ -176,20 +174,20 @@ router.post("/upload-file", upload.single("file"), async (req, res) => {
         reference_no: reference_number,
         amount: amount_sent,
         request_id: request_id
-        });
+        })
 
         const [result] = await pool.query(
         `UPDATE requests 
         SET payment_attachment = ?, reference_no = ?, amount = ? 
         WHERE request_id = ?`,
         [req.file.path, reference_number, amount_sent, request_id]
-        );
+        )
 
-        console.log("Update result:", result);
+        console.log("Update result:", result)
 
         if (result.affectedRows === 0) {
-        console.error("No rows updated - request_id might not exist");
-        return res.status(404).json({ message: "Request not found" });
+        console.error("No rows updated - request_id might not exist")
+        return res.status(404).json({ message: "Request not found" })
         }
 
         res.status(200).json({
@@ -199,16 +197,16 @@ router.post("/upload-file", upload.single("file"), async (req, res) => {
             path: `/attachments/${req.file.filename}`,
             url: `${req.protocol}://${req.get("host")}/attachments/${req.file.filename}`
         }
-        });
+        })
 
     } catch (err) {
-        console.error("Upload Error:", err);
+        console.error("Upload Error:", err)
         res.status(500).json({ 
         message: "Internal server error",
         details: err.message 
-        });
+        })
     }
-});
+})
 
 router.post("/register/alumni-confirmation", async (req, res) => {
   try {
@@ -222,40 +220,40 @@ router.post("/register/alumni-confirmation", async (req, res) => {
       course,
       role,
       password,
-    } = req.body;
+    } = req.body
 
     if (!answerOne || !answerTwo || !answerThree || !email || !username || !course || !role || !password) {
-      return res.status(400).json({ message: "All fields are required." });
+      return res.status(400).json({ message: "All fields are required." })
     }
 
     const normalize = str =>
       str
         .trim()
         .toLowerCase()
-        .replace(/\s+/g, " ");
+        .replace(/\s+/g, " ")
 
-    const a1 = normalize(answerOne);
-    const a2 = normalize(answerTwo);
-    const a3 = normalize(answerThree);
+    const a1 = normalize(answerOne)
+    const a2 = normalize(answerTwo)
+    const a3 = normalize(answerThree)
 
     const validA1 = [
       "engr. sesenio s. rosales and gloria laureana s. rosales",
       "gloria laureana s. rosales and engr. sesenio s. rosales",
-    ];
+    ]
     const validA2 = [
       "honors the defenders of bataan in world war 2",
       "honors the defenders of bataan in world war ii",
-    ];
-    const validA3 = ["gloria laureana s. rosales"];
+    ]
+    const validA3 = ["gloria laureana s. rosales"]
 
-    if (!validA1.includes(a1)) return res.status(400).json({ message: "Incorrect answer for question 1." });
-    if (!validA2.includes(a2)) return res.status(400).json({ message: "Incorrect answer for question 2." });
-    if (!validA3.includes(a3)) return res.status(400).json({ message: "Incorrect answer for question 3." });
+    if (!validA1.includes(a1)) return res.status(400).json({ message: "Incorrect answer for question 1." })
+    if (!validA2.includes(a2)) return res.status(400).json({ message: "Incorrect answer for question 2." })
+    if (!validA3.includes(a3)) return res.status(400).json({ message: "Incorrect answer for question 3." })
 
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const saltRounds = 10
+    const hashedPassword = await bcrypt.hash(password, saltRounds)
 
-    const verifCode = Math.floor(100000 + Math.random() * 900000);
+    const verifCode = Math.floor(100000 + Math.random() * 900000)
 
     verificationStore[email] = {
       verifCode,
@@ -265,30 +263,30 @@ router.post("/register/alumni-confirmation", async (req, res) => {
       role,
       hashedPassword,
       expiresAt: Date.now() + 5 * 60 * 1000,
-    };
+    }
 
-    await sendVerificationEmail(email, verifCode);
+    await sendVerificationEmail(email, verifCode)
 
-    return res.status(201).json({ message: "Verification code sent. Check your email." });
+    return res.status(201).json({ message: "Verification code sent. Check your email." })
   } catch (error) {
-    console.error("Error in alumni confirmation:", error);
-    return res.status(500).json({ message: "Internal server error." });
+    console.error("Error in alumni confirmation:", error)
+    return res.status(500).json({ message: "Internal server error." })
   }
-});
+})
 
 router.post("/create-account-admin", async(req, res) => {
     const saltRounds = 10
     try {
-        const { username, email, studentNo, password, course, role, department } = req.body
-        const [findUser] = await pool.query("SELECT * FROM user WHERE username = ? OR email = ? OR student_number = ?", 
-            [username, email, studentNo]
+        const { username, email, password, role, department } = req.body
+        const [findUser] = await pool.query("SELECT * FROM user WHERE username = ? OR email = ?", 
+            [username, email]
         )
         if (findUser.length > 0) {
-            return res.status(400).json({ message: "User with this username / email / student number already exists" })
+            return res.status(400).json({ message: "User with this username / email already exists" })
         }
         const hashedPassword = await bcrypt.hash(password, saltRounds)
-        const [result] = await pool.query("INSERT INTO user (username, email, password, course, role, department, student_number) VALUES(?, ?, ?, ?, ?, ?, ?)", 
-            [username, email, hashedPassword, course, role, department, studentNo]
+        const [result] = await pool.query("INSERT INTO user (username, email, password, course, role, department) VALUES(?, ?, ?, ?, ?, ?)", 
+            [username, email, hashedPassword, "N/A", role, department]
         )
         return res.status(200).json({ message: "Account created successfully!" })
     } catch (err) {
