@@ -6,6 +6,7 @@ import dotenv from "dotenv"
 import authRoutes from "./routes/authRoutes.js"
 import requestRoutes from "./routes/requestRoutes.js"
 import documentManagementRoute from "./routes/documentManagementRoute.js"
+import onsiteRequestsRoute from "./routes/onsiteRequestsRoute.js"
 import pool from "./database/db.js"
 
 dotenv.config()
@@ -77,6 +78,7 @@ app.use((req, res, next) => {
 app.use(authRoutes)
 app.use(requestRoutes)
 app.use(documentManagementRoute)
+app.use(onsiteRequestsRoute)
 
 // -------------------
 // Test routes

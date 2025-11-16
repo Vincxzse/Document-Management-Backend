@@ -147,65 +147,66 @@ router.post('/reject-req/:request_id', async (req, res) => {
 // UPDATE /create-request to insert into request_documents junction table
 router.post("/create-request", async (req, res) => {
   try {
-    const { student_id, document_id, request_reason } = req.body
-    if (!student_id || !document_id) {
-      return res.status(400).json({ message: "Missing required fields" })
+    const { student_id, document_id, request_reason, amount } = req.body;
+
+    if (!student_id || !document_id || !amount) {
+      return res.status(400).json({ message: "Missing required fields" });
     }
 
     const [existing] = await pool.query(
       "SELECT * FROM requests WHERE document_id = ? AND student_id = ?",
       [document_id, student_id]
-    )
+    );
+
     if (existing.length > 0) {
-      return res.status(400).json({ message: "You already requested this document." })
+      return res.status(400).json({ message: "You already requested this document." });
     }
 
     const [docs] = await pool.query(
       "SELECT processing_time FROM document_types WHERE document_id = ?",
       [document_id]
-    )
+    );
+
     if (docs.length === 0) {
-      return res.status(404).json({ message: "Document not found" })
+      return res.status(404).json({ message: "Document not found" });
     }
 
-    let daysToAdd = 0
-    const match = docs[0].processing_time && docs[0].processing_time.match(/\d+/)
-    if (match) daysToAdd = parseInt(match[0], 10)
+    let daysToAdd = 0;
+    const match = docs[0].processing_time && docs[0].processing_time.match(/\d+/);
+    if (match) daysToAdd = parseInt(match[0], 10);
 
-    const submissionDate = new Date()
-    const releaseDate = new Date(submissionDate)
-    releaseDate.setDate(submissionDate.getDate() + daysToAdd)
-    const formattedReleaseDate = releaseDate.toISOString().split("T")[0]
+    const submissionDate = new Date();
+    const releaseDate = new Date(submissionDate);
+    releaseDate.setDate(submissionDate.getDate() + daysToAdd);
+    const formattedReleaseDate = releaseDate.toISOString().split("T")[0];
 
-    // 1. Insert into requests
+    // ⭐ Insert with AMOUNT
     const [result] = await pool.query(
       `INSERT INTO requests 
-      (student_id, document_id, submission_date, release_date, status, payment, reason) 
-      VALUES (?, ?, NOW(), ?, 'Pending', 'pending', ?)`,
-      [student_id, document_id, formattedReleaseDate, request_reason]
-    )
+      (student_id, document_id, submission_date, release_date, status, payment, reason, amount) 
+      VALUES (?, ?, NOW(), ?, 'Pending', 'pending', ?, ?)`,
+      [student_id, document_id, formattedReleaseDate, request_reason, amount]
+    );
 
-    const requestId = result.insertId
+    const requestId = result.insertId;
 
-    // 2. Insert into request_documents junction table
     await pool.query(
       "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
       [requestId, document_id]
-    )
+    );
 
-    // 3. Insert into request_clearances (auto-create record)
-    await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId])
+    await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId]);
 
     res.status(201).json({
       message: "Request created successfully",
       requestId,
       release_date: formattedReleaseDate,
-    })
+    });
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: "Internal server error" })
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
   }
-})
+});
 
 /* ==========================
    Approve payment
@@ -703,19 +704,40 @@ router.get("/requests/:user_id", async (req, res) => {
     const { user_id } = req.params;
 
     const [requests] = await pool.query(
-      `SELECT r.*, 
-              CASE 
-                WHEN COUNT(rd.document_id) > 0 THEN GROUP_CONCAT(dt.name SEPARATOR ', ')
-                ELSE dt_single.name
-              END AS document_name,
-              COALESCE(COUNT(DISTINCT rd.document_id), 1) as document_count
-       FROM requests r
-       LEFT JOIN request_documents rd ON r.request_id = rd.request_id
-       LEFT JOIN document_types dt ON rd.document_id = dt.document_id
-       LEFT JOIN document_types dt_single ON r.document_id = dt_single.document_id
-       WHERE r.student_id = ?
-       GROUP BY r.request_id, dt_single.name
-       ORDER BY r.submission_date DESC`,
+      `
+      SELECT 
+          r.request_id,
+          r.student_id,
+          r.document_id,
+          r.amount,                     -- ⭐ FIX: amount explicitly included
+          r.payment,
+          r.status,
+          r.completed_at,
+          r.release_date,
+          r.submission_date,
+          r.reason,
+          r.payment_attachment,
+          r.reference_no,
+          r.rejection_reason,
+          r.request_rejection,
+          r.document_ids,
+
+          CASE 
+              WHEN COUNT(rd.document_id) > 0 THEN GROUP_CONCAT(dt.name SEPARATOR ', ')
+              ELSE dt_single.name
+          END AS document_name,
+
+          COALESCE(COUNT(DISTINCT rd.document_id), 1) AS document_count
+
+      FROM requests r
+      LEFT JOIN request_documents rd ON r.request_id = rd.request_id
+      LEFT JOIN document_types dt ON rd.document_id = dt.document_id
+      LEFT JOIN document_types dt_single ON r.document_id = dt_single.document_id
+
+      WHERE r.student_id = ?
+      GROUP BY r.request_id         -- ⭐ FIX: remove dt_single.name
+      ORDER BY r.submission_date DESC
+      `,
       [user_id]
     );
 
@@ -729,6 +751,7 @@ router.get("/requests/:user_id", async (req, res) => {
     });
   }
 });
+
 
 /* ==========================
    Get all requests (admin)
@@ -793,9 +816,9 @@ router.get("/get-requests", async (req, res) => {
         r.payment,
         r.payment_attachment,
         r.reference_no,
-        r.amount,
         r.rejection_reason,
         r.reason,
+        r.amount,
         DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
         DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
         CASE 
@@ -1744,5 +1767,160 @@ router.get(
   }
 );
 
+// Add this new route to handle marking requests as completed
+router.put("/complete-request/:request_id", async (req, res) => {
+  try {
+    const { request_id } = req.params;
+
+    // Get request details, student info, and clearance status
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username, u.course, u.role, d.name as document_name
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       LEFT JOIN document_types d ON r.document_id = d.document_id
+       WHERE r.request_id = ?`,
+      [request_id]
+    );
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    const request = requestData[0];
+
+    // Fetch student clearance
+    const [clearanceData] = await pool.query(
+      "SELECT * FROM student_clearance WHERE student_id = ?",
+      [request.student_id]
+    );
+
+    if (clearanceData.length === 0) {
+      return res.status(400).json({ 
+        message: "Student clearance not found. Please ensure all clearances are completed first." 
+      });
+    }
+
+    const clearance = clearanceData[0];
+    const courseLower = (request.course || "").toLowerCase().trim();
+    const studentRole = (request.role || "").toLowerCase();
+
+    // Check if all required clearances are approved
+    let allClearancesApproved = false;
+
+    if (studentRole === "alumni") {
+      allClearancesApproved = 
+        clearance.registrar_status === "approved" && 
+        clearance.cashier_status === "approved";
+    } else {
+      // Base departments
+      const baseDepts = ["registrar", "guidance", "library", "cashier"];
+      allClearancesApproved = baseDepts.every(d => 
+        clearance[`${d}_status`] === "approved"
+      );
+
+      // Check program head clearance
+      if (allClearancesApproved) {
+        const misCourses = [
+          "bachelor of science in accountancy",
+          "bachelor of science in accounting technology",
+          "bachelor of science in entrepreneurship",
+          "bachelor of science in information technology",
+          "bachelor of science in computer engineering",
+        ];
+        
+        const engineeringCourses = [
+          "bachelor of science in architecture",
+          "bachelor of science in civil engineering",
+          "bachelor of science in electronics engineering",
+          "bachelor of science in electrical engineering",
+          "bachelor of science in mechanical engineering",
+        ];
+        
+        const criminologyCourses = ["bachelor of science in criminology"];
+
+        if (misCourses.includes(courseLower)) {
+          allClearancesApproved = clearance.mis_status === "approved";
+        } else if (engineeringCourses.includes(courseLower)) {
+          allClearancesApproved = clearance.engineering_status === "approved";
+        } else if (criminologyCourses.includes(courseLower)) {
+          allClearancesApproved = clearance.criminology_status === "approved";
+        }
+      }
+    }
+
+    if (!allClearancesApproved) {
+      return res.status(400).json({ 
+        message: "Cannot mark as completed. All required clearances must be approved first." 
+      });
+    }
+
+    // Update request status to completed and set completed_at timestamp
+    const [result] = await pool.query(
+      "UPDATE requests SET status = 'completed', completed_at = NOW() WHERE request_id = ?",
+      [request_id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Failed to update request" });
+    }
+
+    // Calculate pickup date (using release_date as base)
+    const processingTimes = {
+      "good moral certificate": 3,
+      "certificate of registration": 2,
+      "certificate of grades": 2,
+      "transcript of records": 7,
+      "form 137 (school records)": 5,
+      "diploma": 15,
+      "certification of graduation": 4,
+      "honorable dismissal": 3,
+    };
+
+    const docNameLower = (request.document_name || "").toLowerCase();
+    const daysToAdd = processingTimes[docNameLower] || 3;
+    
+    const releaseDate = new Date(request.release_date);
+    let businessDays = 0;
+    let pickupDate = new Date(releaseDate);
+    
+    while (businessDays < daysToAdd) {
+      pickupDate.setDate(pickupDate.getDate() + 1);
+      const dayOfWeek = pickupDate.getDay();
+      if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+        businessDays++;
+      }
+    }
+    
+    const pickupDateFormatted = pickupDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
+    // Send SMS notification
+    if (request.phone) {
+      const smsMessage = `Hi ${request.username}, your requested document "${request.document_name}" (Request #${request_id}) is now ready for pickup at BHC Registrar's Office on ${pickupDateFormatted}. Please bring a valid ID.`;
+      
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err);
+      });
+      console.log(`✅ Document ready SMS sent to ${request.phone}`);
+    }
+
+    res.json({ 
+      message: "Request marked as completed successfully",
+      requestId: request_id,
+      pickupDate: pickupDateFormatted,
+      smsSent: !!request.phone 
+    });
+
+  } catch (error) {
+    console.error("Error completing request:", error);
+    res.status(500).json({ 
+      message: "Failed to mark request as completed",
+      details: error.message 
+    });
+  }
+});
 
 export default router
