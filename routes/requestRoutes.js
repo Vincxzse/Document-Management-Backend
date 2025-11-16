@@ -783,7 +783,6 @@ router.get("/get-all-requests", async (req, res) => {
 router.get("/get-requests", async (req, res) => {
   try {
     const { role, department } = req.query; 
-    // Example: ?role=admin&department=engineering
 
     let whereClause = "";
     const params = [];
@@ -797,13 +796,23 @@ router.get("/get-requests", async (req, res) => {
         whereClause = "WHERE LOWER(u.course) LIKE ?";
         params.push("%criminology%");
       } else if (department === "mis") {
-        whereClause = "WHERE LOWER(u.course) LIKE ?";
-        params.push("%information technology%");
+        whereClause = `WHERE (
+          LOWER(u.course) LIKE ? OR 
+          LOWER(u.course) LIKE ? OR 
+          LOWER(u.course) LIKE ? OR 
+          LOWER(u.course) LIKE ? OR 
+          LOWER(u.course) LIKE ?
+        )`;
+        params.push(
+          "%information technology%",
+          "%accountancy%",
+          "%accounting technology%",
+          "%entrepreneurship%",
+          "%computer technology%"
+        );
       } else if (department === "guidance" || department === "registrar" || department === "cashier" || department === "library") {
-        // These departments can see all requests (optional — adjust if needed)
         whereClause = "";
       } else {
-        // Default: no restriction
         whereClause = "";
       }
     }
@@ -843,7 +852,7 @@ router.get("/get-requests", async (req, res) => {
       LEFT JOIN document_types d ON rd.document_id = d.document_id
       LEFT JOIN document_types dt ON r.document_id = dt.document_id
       ${whereClause}
-      GROUP BY r.request_id, u.username, u.course, u.email, dt.name, 
+      GROUP BY r.request_id, u.username, u.course, u.email,
                c.registrar_status, c.guidance_status, c.engineering_status, 
                c.criminology_status, c.mis_status, c.library_status, c.cashier_status
       ORDER BY r.request_id DESC
@@ -855,7 +864,6 @@ router.get("/get-requests", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch requests", details: err.message });
   }
 });
-
 
 /* ==========================
    Request status update
