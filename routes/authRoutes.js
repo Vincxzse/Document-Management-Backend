@@ -8,6 +8,7 @@ import { sendVerificationEmail } from '../email/brevo.js'
 import { sendSMS } from "../services/smsService.js"
 
 const verificationStore = {}
+const passwordResetStore = {}
 
 const router = express.Router()
 
@@ -291,6 +292,142 @@ router.post("/create-account-admin", async(req, res) => {
         return res.status(200).json({ message: "Account created successfully!" })
     } catch (err) {
         console.error(err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+router.post("/forgot-password", async (req, res) => {
+    try {
+        const { email } = req.body
+        
+        if (!email) {
+        return res.status(400).json({ message: "Email is required" })
+        }
+
+        const [findUser] = await pool.query(
+        "SELECT * FROM user WHERE email = ?",
+        [email.toLowerCase()]
+        )
+
+        if (findUser.length === 0) {
+        return res.status(404).json({ message: "No account found with this email" })
+        }
+
+        const resetCode = Math.floor(100000 + Math.random() * 900000)
+
+        passwordResetStore[email.toLowerCase()] = {
+        resetCode,
+        userId: findUser[0].uid,
+        expiresAt: Date.now() + 15 * 60 * 1000
+        }
+
+        await sendVerificationEmail(email, resetCode)
+
+        console.log(`Password reset code sent to ${email}: ${resetCode}`)
+
+        return res.status(200).json({ 
+        message: "Verification code sent to your email. Please check your inbox." 
+        })
+
+    } catch (err) {
+        console.error("Forgot password error:", err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+router.post("/verify-reset-code", async (req, res) => {
+    try {
+        const { email, code } = req.body
+
+        if (!email || !code) {
+        return res.status(400).json({ message: "Email and code are required" })
+        }
+
+        const entry = passwordResetStore[email.toLowerCase()]
+
+        if (!entry) {
+        return res.status(400).json({ message: "No reset request found for this email" })
+        }
+
+        if (entry.expiresAt < Date.now()) {
+        delete passwordResetStore[email.toLowerCase()]
+        return res.status(400).json({ message: "Verification code expired. Please request a new one." })
+        }
+
+        if (entry.resetCode != code) {
+        return res.status(400).json({ message: "Invalid verification code" })
+        }
+
+        return res.status(200).json({ 
+        message: "Code verified successfully",
+        verified: true 
+        })
+
+    } catch (err) {
+        console.error("Verify reset code error:", err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+router.post("/reset-password", async (req, res) => {
+    try {
+        const { email, code, newPassword } = req.body
+
+        if (!email || !code || !newPassword) {
+        return res.status(400).json({ message: "Email, code, and new password are required" })
+        }
+
+        const entry = passwordResetStore[email.toLowerCase()]
+
+        if (!entry) {
+        return res.status(400).json({ message: "No reset request found. Please start over." })
+        }
+
+        if (entry.expiresAt < Date.now()) {
+        delete passwordResetStore[email.toLowerCase()]
+        return res.status(400).json({ message: "Verification code expired. Please request a new one." })
+        }
+
+        if (entry.resetCode != code) {
+        return res.status(400).json({ message: "Invalid verification code" })
+        }
+
+        if (
+        !validator.isStrongPassword(newPassword, {
+            minLength: 8,
+            minLowercase: 1,
+            minUppercase: 1,
+            minNumbers: 1,
+            minSymbols: 1,
+        })
+        ) {
+        return res.status(400).json({ 
+            message: "Password is too weak. It must be at least 8 characters long and include uppercase, lowercase, number, and symbol." 
+        })
+        }
+
+        const saltRounds = 10
+        const hashedPassword = await bcrypt.hash(newPassword, saltRounds)
+
+        const [result] = await pool.query(
+        "UPDATE user SET password = ? WHERE uid = ?",
+        [hashedPassword, entry.userId]
+        )
+
+        if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "User not found" })
+        }
+
+        delete passwordResetStore[email.toLowerCase()]
+
+        console.log(`Password reset successful for user ID: ${entry.userId}`)
+
+        return res.status(200).json({ 
+        message: "Password reset successfully. You can now login with your new password." 
+        })
+
+    } catch (err) {
+        console.error("Reset password error:", err.message)
         return res.status(500).json({ message: "Internal server error" })
     }
 })

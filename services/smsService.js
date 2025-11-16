@@ -14,12 +14,15 @@ export async function sendSMS(to, message) {
     const response = await axios.post(url, {
       api_token: apiKey,
       phone_number: to,
-      message: message
+      message: message,
+      sms_provider: 2,
     })
 
     console.log("SMS Sent Successfully:", response.data)
+    return response.data
   } catch (error) {
     console.error("Failed to send SMS:", error.response?.data || error.message)
+    throw error
   }
 }
 
