@@ -432,4 +432,264 @@ router.post("/reset-password", async (req, res) => {
     }
 })
 
+router.put("/update-profile", async (req, res) => {
+    try {
+        const { userId, username, course, studentNumber, phone } = req.body
+
+        if (!userId) {
+            return res.status(400).json({ message: "User ID is required" })
+        }
+
+        // Check if username is taken by another user
+        if (username) {
+            const [existingUser] = await pool.query(
+                "SELECT uid FROM user WHERE username = ? AND uid != ?",
+                [username, userId]
+            )
+            if (existingUser.length > 0) {
+                return res.status(400).json({ message: "Username already taken" })
+            }
+        }
+
+        // Check if student number is taken by another user
+        if (studentNumber) {
+            const [existingStudent] = await pool.query(
+                "SELECT uid FROM user WHERE student_number = ? AND uid != ?",
+                [studentNumber, userId]
+            )
+            if (existingStudent.length > 0) {
+                return res.status(400).json({ message: "Student number already in use" })
+            }
+        }
+
+        // Build dynamic update query
+        const updates = []
+        const values = []
+
+        if (username) {
+            updates.push("username = ?")
+            values.push(username.trim())
+        }
+        if (course) {
+            updates.push("course = ?")
+            values.push(course)
+        }
+        if (studentNumber) {
+            updates.push("student_number = ?")
+            values.push(studentNumber)
+        }
+        if (phone !== undefined) {
+            updates.push("phone = ?")
+            values.push(phone)
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({ message: "No fields to update" })
+        }
+
+        values.push(userId)
+        
+        const [result] = await pool.query(
+            `UPDATE user SET ${updates.join(", ")} WHERE uid = ?`,
+            values
+        )
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "User not found" })
+        }
+
+        // Get updated user data
+        const [updatedUser] = await pool.query(
+            "SELECT uid, username, email, phone, student_number, course, role, department FROM user WHERE uid = ?",
+            [userId]
+        )
+
+        return res.status(200).json({ 
+            message: "Profile updated successfully",
+            user: updatedUser[0]
+        })
+
+    } catch (err) {
+        console.error("Update profile error:", err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+// Request email change verification
+router.post("/request-email-change", async (req, res) => {
+    try {
+        const { userId, currentEmail, newEmail } = req.body
+
+        if (!userId || !currentEmail || !newEmail) {
+            return res.status(400).json({ message: "All fields are required" })
+        }
+
+        // Verify user exists and current email matches
+        const [user] = await pool.query(
+            "SELECT uid, email FROM user WHERE uid = ?",
+            [userId]
+        )
+
+        if (user.length === 0) {
+            return res.status(404).json({ message: "User not found" })
+        }
+
+        if (user[0].email.toLowerCase() !== currentEmail.toLowerCase()) {
+            return res.status(400).json({ message: "Current email doesn't match" })
+        }
+
+        // Check if new email is already in use
+        const [existingEmail] = await pool.query(
+            "SELECT uid FROM user WHERE email = ? AND uid != ?",
+            [newEmail.toLowerCase(), userId]
+        )
+
+        if (existingEmail.length > 0) {
+            return res.status(400).json({ message: "Email already in use" })
+        }
+
+        // Generate verification code
+        const verifCode = Math.floor(100000 + Math.random() * 900000)
+
+        // Store in verification store
+        const emailChangeKey = `email_change_${userId}`
+        verificationStore[emailChangeKey] = {
+            verifCode,
+            userId,
+            newEmail: newEmail.toLowerCase(),
+            expiresAt: Date.now() + 15 * 60 * 1000 // 15 minutes
+        }
+
+        // Send verification email to NEW email
+        await sendVerificationEmail(newEmail, verifCode)
+
+        return res.status(200).json({ 
+            message: "Verification code sent to your new email address" 
+        })
+
+    } catch (err) {
+        console.error("Request email change error:", err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+// Verify and complete email change
+router.post("/verify-email-change", async (req, res) => {
+    try {
+        const { userId, code } = req.body
+
+        if (!userId || !code) {
+            return res.status(400).json({ message: "User ID and code are required" })
+        }
+
+        const emailChangeKey = `email_change_${userId}`
+        const entry = verificationStore[emailChangeKey]
+
+        if (!entry) {
+            return res.status(400).json({ message: "No email change request found" })
+        }
+
+        if (entry.expiresAt < Date.now()) {
+            delete verificationStore[emailChangeKey]
+            return res.status(400).json({ message: "Verification code expired" })
+        }
+
+        if (entry.verifCode != code) {
+            return res.status(400).json({ message: "Invalid verification code" })
+        }
+
+        // Update email in database
+        const [result] = await pool.query(
+            "UPDATE user SET email = ? WHERE uid = ?",
+            [entry.newEmail, userId]
+        )
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "User not found" })
+        }
+
+        // Get updated user data
+        const [updatedUser] = await pool.query(
+            "SELECT uid, username, email, phone, student_number, course, role, department FROM user WHERE uid = ?",
+            [userId]
+        )
+
+        // Clean up verification store
+        delete verificationStore[emailChangeKey]
+
+        return res.status(200).json({ 
+            message: "Email updated successfully",
+            user: updatedUser[0]
+        })
+
+    } catch (err) {
+        console.error("Verify email change error:", err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+// Change password (requires current password)
+router.post("/change-password", async (req, res) => {
+    try {
+        const { userId, currentPassword, newPassword } = req.body
+
+        if (!userId || !currentPassword || !newPassword) {
+            return res.status(400).json({ message: "All fields are required" })
+        }
+
+        // Get user's current password
+        const [user] = await pool.query(
+            "SELECT password FROM user WHERE uid = ?",
+            [userId]
+        )
+
+        if (user.length === 0) {
+            return res.status(404).json({ message: "User not found" })
+        }
+
+        // Verify current password
+        const isValid = await bcrypt.compare(currentPassword, user[0].password)
+        if (!isValid) {
+            return res.status(401).json({ message: "Current password is incorrect" })
+        }
+
+        // Validate new password strength
+        if (
+            !validator.isStrongPassword(newPassword, {
+                minLength: 8,
+                minLowercase: 1,
+                minUppercase: 1,
+                minNumbers: 1,
+                minSymbols: 1,
+            })
+        ) {
+            return res.status(400).json({ 
+                message: "Password is too weak. It must be at least 8 characters long and include uppercase, lowercase, number, and symbol." 
+            })
+        }
+
+        // Hash new password
+        const saltRounds = 10
+        const hashedPassword = await bcrypt.hash(newPassword, saltRounds)
+
+        // Update password
+        const [result] = await pool.query(
+            "UPDATE user SET password = ? WHERE uid = ?",
+            [hashedPassword, userId]
+        )
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "User not found" })
+        }
+
+        return res.status(200).json({ 
+            message: "Password changed successfully" 
+        })
+
+    } catch (err) {
+        console.error("Change password error:", err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
 export default router
