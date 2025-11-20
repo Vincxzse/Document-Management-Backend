@@ -275,23 +275,122 @@ router.post("/register/alumni-confirmation", async (req, res) => {
   }
 })
 
+// Add this to your existing auth.js file
+
+// Store for admin account verification (add at the top with other stores)
+const adminVerificationStore = {}
+
+// Replace the existing /create-account-admin route with this:
 router.post("/create-account-admin", async(req, res) => {
-    const saltRounds = 10
     try {
         const { username, email, password, role, department } = req.body
-        const [findUser] = await pool.query("SELECT * FROM user WHERE username = ? OR email = ?", 
+        
+        // Check if user already exists
+        const [findUser] = await pool.query(
+            "SELECT * FROM user WHERE username = ? OR email = ?", 
             [username, email]
         )
+        
         if (findUser.length > 0) {
-            return res.status(400).json({ message: "User with this username / email already exists" })
+            return res.status(400).json({ 
+                message: "User with this username / email already exists" 
+            })
         }
+
+        // Validate password strength
+        if (
+            !validator.isStrongPassword(password, {
+                minLength: 8,
+                minLowercase: 1,
+                minUppercase: 1,
+                minNumbers: 1,
+                minSymbols: 1,
+            })
+        ) {
+            return res.status(400).json({ 
+                message: "Password is too weak. It must be at least 8 characters long and include uppercase, lowercase, number, and symbol." 
+            })
+        }
+
+        // Hash password
+        const saltRounds = 10
         const hashedPassword = await bcrypt.hash(password, saltRounds)
-        const [result] = await pool.query("INSERT INTO user (username, email, password, course, role, department) VALUES(?, ?, ?, ?, ?, ?)", 
-            [username, email, hashedPassword, "N/A", role, department]
-        )
-        return res.status(200).json({ message: "Account created successfully!" })
+
+        // Generate verification code
+        const verifCode = Math.floor(100000 + Math.random() * 900000)
+
+        // Store admin account data temporarily
+        adminVerificationStore[email.toLowerCase()] = {
+            verifCode,
+            username,
+            hashedPassword,
+            role,
+            department,
+            expiresAt: Date.now() + 15 * 60 * 1000 // 15 minutes
+        }
+
+        // Send verification email
+        await sendVerificationEmail(email, verifCode)
+
+        console.log(`Admin verification code sent to ${email}: ${verifCode}`)
+
+        return res.status(200).json({ 
+            message: "Verification code sent to email. Please check your inbox." 
+        })
+
     } catch (err) {
         console.error(err.message)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+})
+
+// Add new route for verifying admin account creation
+router.post("/verify-admin-creation", async(req, res) => {
+    try {
+        const { email, code } = req.body
+
+        if (!email || !code) {
+            return res.status(400).json({ message: "Email and code are required" })
+        }
+
+        const entry = adminVerificationStore[email.toLowerCase()]
+
+        if (!entry) {
+            return res.status(400).json({ 
+                message: "No verification request found. Please start over." 
+            })
+        }
+
+        if (entry.expiresAt < Date.now()) {
+            delete adminVerificationStore[email.toLowerCase()]
+            return res.status(400).json({ 
+                message: "Verification code expired. Please request a new one." 
+            })
+        }
+
+        if (entry.verifCode != code) {
+            return res.status(400).json({ message: "Invalid verification code" })
+        }
+
+        // Create the admin account
+        const { username, hashedPassword, role, department } = entry
+
+        const [result] = await pool.query(
+            "INSERT INTO user (username, email, password, course, role, department) VALUES(?, ?, ?, ?, ?, ?)", 
+            [username, email.toLowerCase(), hashedPassword, "N/A", role, department]
+        )
+
+        // Clean up verification store
+        delete adminVerificationStore[email.toLowerCase()]
+
+        console.log(`Admin account created successfully for ${email}`)
+
+        return res.status(200).json({ 
+            message: "Admin account created successfully!" 
+        })
+
+    } catch (err) {
+        console.error("Verify admin creation error:", err.message)
         return res.status(500).json({ message: "Internal server error" })
     }
 })

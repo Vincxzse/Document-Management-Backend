@@ -21,21 +21,22 @@ router.post("/create-onsite-request", async (req, res) => {
             return res.status(400).json({ message: "Invalid request data" })
         }
 
-        // Insert all requests with reason field
+        // Insert all requests with student_no and reason fields
         const values = requests.map(req => [
             req.name,
+            req.student_no,
             req.phone,
             req.course,
             req.document_requested,
-            req.reason  // Add reason field
+            req.reason
         ])
 
-        const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(", ")
+        const placeholders = values.map(() => "(?, ?, ?, ?, ?, ?)").join(", ")
         const flatValues = values.flat()
 
         await pool.query(
-            `INSERT INTO onsite_request (name, phone, course, document_requested, reason) 
-             VALUES ${placeholders}`,
+            `INSERT INTO onsite_request (name, student_no, phone, course, document_requested, reason) 
+            VALUES ${placeholders}`,
             flatValues
         )
 

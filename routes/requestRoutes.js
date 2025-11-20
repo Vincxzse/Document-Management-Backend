@@ -44,7 +44,6 @@ async function updateClearanceRow(requestId, department, status, reason) {
 
   const [result] = await pool.query(query, params)
   if (result.affectedRows === 0) {
-    // If there's no clearance row yet, create it then retry the update
     const [exists] = await pool.query("SELECT 1 FROM request_clearances WHERE request_id = ?", [requestId])
     if (exists.length === 0) {
       await pool.query("INSERT INTO request_clearances (request_id) VALUES (?)", [requestId])
@@ -57,7 +56,7 @@ async function updateClearanceRow(requestId, department, status, reason) {
     }
   }
 
-  // After updating, check overall clearance statuses to set request.status
+  // After updating, check overall clearance statuses
   const [clearanceStatusRows] = await pool.query(
     `SELECT registrar_status, guidance_status, engineering_status,
             criminology_status, mis_status, library_status, cashier_status
@@ -74,9 +73,65 @@ async function updateClearanceRow(requestId, department, status, reason) {
     if (anyRejected) {
       await pool.query("UPDATE requests SET status = 'rejected' WHERE request_id = ?", [requestId])
     } else if (allApproved) {
-      await pool.query("UPDATE requests SET status = 'approved' WHERE request_id = ?", [requestId])
-    } else {
-      // optional: keep as is (pending/in-progress)
+      // ✅ NEW: Update to "in progress" and send SMS notification
+      await pool.query("UPDATE requests SET status = 'in progress' WHERE request_id = ?", [requestId])
+      
+      // Get request and student details for SMS
+      const [requestData] = await pool.query(
+        `SELECT r.*, u.phone, u.username, d.name as document_name
+         FROM requests r 
+         JOIN user u ON r.student_id = u.uid 
+         LEFT JOIN document_types d ON r.document_id = d.document_id
+         WHERE r.request_id = ?`,
+        [requestId]
+      )
+
+      if (requestData.length > 0) {
+        const request = requestData[0]
+        
+        // Calculate expected pickup date
+        const processingTimes = {
+          "good moral certificate": 3,
+          "certificate of registration": 2,
+          "certificate of grades": 2,
+          "transcript of records": 7,
+          "form 137 (school records)": 5,
+          "diploma": 15,
+          "certification of graduation": 4,
+          "honorable dismissal": 3,
+        }
+
+        const docNameLower = (request.document_name || "").toLowerCase()
+        const daysToAdd = processingTimes[docNameLower] || 3
+        
+        const releaseDate = new Date(request.release_date)
+        let businessDays = 0
+        let pickupDate = new Date(releaseDate)
+        
+        while (businessDays < daysToAdd) {
+          pickupDate.setDate(pickupDate.getDate() + 1)
+          const dayOfWeek = pickupDate.getDay()
+          if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+            businessDays++
+          }
+        }
+        
+        const pickupDateFormatted = pickupDate.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        })
+
+        // Send SMS notification
+        if (request.phone) {
+          const smsMessage = `Hi ${request.username}, good news! Your request for "${request.document_name}" (Request #${requestId}) has been approved and is now being processed. Expected ready date: ${pickupDateFormatted}. You'll receive another notification when it's ready for pickup at BHC Registrar's Office.`
+          
+          await sendSMS(request.phone, smsMessage).catch(err => {
+            console.error("SMS sending failed:", err)
+          })
+          console.log(`✅ Approval SMS sent to ${request.phone}`)
+        }
+      }
     }
   }
 
@@ -897,11 +952,46 @@ router.put("/request-status/:id", async (req, res) => {
       let smsMessage = ""
       
       if (status.toLowerCase() === "approved") {
-        smsMessage = `Hi ${request.username}, your document request #${id} for "${request.document_name}" has been approved by BHC. You will be notified when it's ready for pickup.`
-      } else if (status.toLowerCase() === "rejected") {
-        smsMessage = `Hi ${request.username}, your document request #${id} for "${request.document_name}" has been rejected. Please contact the registrar's office for more information.`
-      } else if (status.toLowerCase() === "ready for pickup" || status.toLowerCase() === "completed") {
-        smsMessage = `Hi ${request.username}, your requested document "${request.document_name}" (Request #${id}) is now ready for pickup at BHC. Please bring a valid ID.`
+        // Get the document's processing time from database
+        const [docInfo] = await pool.query(
+          "SELECT processing_time FROM document_types WHERE name = ?",
+          [request.document_name]
+        )
+
+        let daysToAdd = 3 // default fallback
+        if (docInfo.length > 0 && docInfo[0].processing_time) {
+          // Parse "10-15 business days" -> take the maximum (15)
+          const match = docInfo[0].processing_time.match(/(\d+)-(\d+)/)
+          if (match) {
+            daysToAdd = parseInt(match[2]) // Use the upper bound
+          } else {
+            const singleMatch = docInfo[0].processing_time.match(/(\d+)/)
+            if (singleMatch) {
+              daysToAdd = parseInt(singleMatch[1])
+            }
+          }
+        }
+
+        // Calculate pickup date using business days
+        const releaseDate = new Date(request.release_date || new Date())
+        let businessDays = 0
+        let pickupDate = new Date(releaseDate)
+        
+        while (businessDays < daysToAdd) {
+          pickupDate.setDate(pickupDate.getDate() + 1)
+          const dayOfWeek = pickupDate.getDay()
+          if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+            businessDays++
+          }
+        }
+        
+        const pickupDateFormatted = pickupDate.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        })
+
+        smsMessage = `Hi ${request.username}, your document request #${id} for "${request.document_name}" has been approved by BHC and is being processed. Expected ready date: ${pickupDateFormatted}. You'll be notified when it's ready for pickup.`
       }
 
       if (smsMessage) {
@@ -1907,12 +1997,12 @@ router.put("/complete-request/:request_id", async (req, res) => {
 
     // Send SMS notification
     if (request.phone) {
-      const smsMessage = `Hi ${request.username}, your requested document "${request.document_name}" (Request #${request_id}) is now ready for pickup at BHC Registrar's Office on ${pickupDateFormatted}. Please bring a valid ID.`;
+      const smsMessage = `Hi ${request.username}, your requested document "${request.document_name}" (Request #${request_id}) is now ready for pickup at BHC Registrar's Office on ${pickupDateFormatted}. Please bring a valid ID.`
       
       await sendSMS(request.phone, smsMessage).catch(err => {
-        console.error("SMS sending failed:", err);
-      });
-      console.log(`✅ Document ready SMS sent to ${request.phone}`);
+        console.error("SMS sending failed:", err)
+      })
+      console.log(`✅ Document ready SMS sent to ${request.phone}`)
     }
 
     res.json({ 
