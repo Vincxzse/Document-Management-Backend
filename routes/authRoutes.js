@@ -154,34 +154,25 @@ router.post("/upload-file", upload.single("file"), async (req, res) => {
     try {
         const { request_id, reference_number, amount_sent } = req.body
 
-        console.log("=== UPLOAD DEBUG ===")
-        console.log("request_id:", request_id)
-        console.log("reference_number:", reference_number)
-        console.log("amount_sent:", amount_sent)
-        console.log("file:", req.file)
-
         if (!req.file) {
-        console.error("No file uploaded")
-        return res.status(400).json({ message: "No file uploaded" })
+            return res.status(400).json({ message: "No file uploaded" })
         }
 
         if (!request_id) {
-        console.error("No request_id provided")
         return res.status(400).json({ message: "request_id is required" })
         }
 
         console.log("Updating request with:", {
-        path: req.file.path,
-        reference_no: reference_number,
-        amount: amount_sent,
-        request_id: request_id
+            path: req.file.path,
+            reference_no: reference_number,
+            amount: amount_sent,
+            request_id: request_id
         })
 
         const [result] = await pool.query(
-        `UPDATE requests 
-        SET payment_attachment = ?, reference_no = ?, amount = ? 
-        WHERE request_id = ?`,
-        [req.file.path, reference_number, amount_sent, request_id]
+            `UPDATE requests 
+            SET payment_attachment = ? WHERE request_id = ?`,
+            [req.file.path, request_id]
         )
 
         console.log("Update result:", result)
