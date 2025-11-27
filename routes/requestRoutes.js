@@ -634,10 +634,11 @@ router.get("/requests/:user_id", async (req, res) => {
           r.request_id,
           r.student_id,
           r.document_id,
-          r.amount,                     -- ⭐ FIX: amount explicitly included
+          r.amount,
           r.payment,
           r.status,
           r.completed_at,
+          r.released_at,
           r.release_date,
           r.submission_date,
           r.reason,
@@ -659,7 +660,7 @@ router.get("/requests/:user_id", async (req, res) => {
       LEFT JOIN document_types dt_single ON r.document_id = dt_single.document_id
 
       WHERE r.student_id = ?
-      GROUP BY r.request_id         -- ⭐ FIX: remove dt_single.name
+      GROUP BY r.request_id
       ORDER BY r.submission_date DESC
       `,
       [user_id]
@@ -742,6 +743,8 @@ router.get("/get-requests", async (req, res) => {
         r.rejection_reason,
         r.reason,
         r.amount,
+        r.completed_at,
+        r.released_at,
         DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
         DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
         CASE 
@@ -1018,45 +1021,73 @@ router.post("/checkout", async (req, res) => {
     if (!user_id || !items || items.length === 0) {
       return res.status(400).json({ message: "Invalid checkout data" })
     }
-    const documentIds = items.map(item => item.document_id || item.doc_id)
-    
-    const [documents] = await pool.query(
-      "SELECT document_id, fee, name FROM document_types WHERE document_id IN (?)",
-      [documentIds]
-    )
 
-    const totalAmount = documents.reduce((sum, doc) => sum + parseFloat(doc.fee || 0), 0)
+    const createdRequests = []
 
-    const reasonsList = items.map(item => {
-      const doc = documents.find(d => d.document_id === (item.document_id || item.doc_id))
-      const docName = item.doc_name || doc?.name || 'Document'
-      return `${docName}: ${item.reason || 'No reason provided'}`
-    }).join(' ')
-    const submission_date = new Date().toISOString()
-    const [result] = await pool.query(
-      `INSERT INTO requests 
-       (student_id, document_ids, payment, status, submission_date, amount, reason) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        user_id,
-        JSON.stringify(documentIds),
-        "pending",
-        "Pending",
-        submission_date,
-        totalAmount.toFixed(2),
-        reasonsList
-      ]
-    )
-
-    const requestId = result.insertId
-
+    // Create a SEPARATE request for each item
     for (const item of items) {
+      const documentId = item.document_id || item.doc_id
+      
+      // Get document details
+      const [documents] = await pool.query(
+        "SELECT document_id, fee, name, processing_time FROM document_types WHERE document_id = ?",
+        [documentId]
+      )
+
+      if (documents.length === 0) {
+        console.error(`Document ${documentId} not found`)
+        continue
+      }
+
+      const doc = documents[0]
+      const amount = parseFloat(doc.fee || 0)
+
+      // Calculate release date
+      let daysToAdd = 0
+      const match = doc.processing_time && doc.processing_time.match(/\d+/)
+      if (match) daysToAdd = parseInt(match[0], 10)
+
+      const submissionDate = new Date()
+      const releaseDate = new Date(submissionDate)
+      releaseDate.setDate(submissionDate.getDate() + daysToAdd)
+      const formattedReleaseDate = releaseDate.toISOString().split("T")[0]
+
+      // Create individual request for this document
+      const [result] = await pool.query(
+        `INSERT INTO requests 
+         (student_id, document_id, submission_date, release_date, status, payment, reason, amount) 
+         VALUES (?, ?, NOW(), ?, 'Pending', 'pending', ?, ?)`,
+        [
+          user_id,
+          documentId,
+          formattedReleaseDate,
+          item.reason || 'No reason provided',
+          amount.toFixed(2)
+        ]
+      )
+
+      const requestId = result.insertId
+
+      // Insert into request_documents
       await pool.query(
         "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
-        [requestId, item.document_id || item.doc_id]
+        [requestId, documentId]
       )
+
+      // Create clearance row
+      await pool.query(
+        "INSERT INTO request_clearances (request_id) VALUES (?)",
+        [requestId]
+      )
+
+      createdRequests.push({
+        request_id: requestId,
+        document_name: doc.name,
+        amount: amount.toFixed(2)
+      })
     }
 
+    // Remove all checked items from cart
     const itemIds = items.map(item => item.item_id)
     await pool.query(
       "DELETE FROM document_cart WHERE user_id = ? AND item_id IN (?)",
@@ -1064,11 +1095,9 @@ router.post("/checkout", async (req, res) => {
     )
 
     res.json({
-      message: "Checkout successful! One request created for all documents.",
-      request_id: requestId,
-      total_documents: documentIds.length,
-      total_amount: totalAmount.toFixed(2),
-      reasons: reasonsList
+      message: `${createdRequests.length} request(s) created successfully!`,
+      requests: createdRequests,
+      total_requests: createdRequests.length
     })
 
   } catch (error) {
@@ -1650,13 +1679,74 @@ router.put("/complete-request/:request_id", async (req, res) => {
       message: "Request marked as completed successfully",
       requestId: request_id,
       pickupDate: pickupDateFormatted,
-      smsSent: !!request.phone 
+      smsSent: !!request.phone
     })
 
   } catch (error) {
     console.error("Error completing request:", error)
     res.status(500).json({ 
       message: "Failed to mark request as completed",
+      details: error.message 
+    })
+  }
+})
+
+router.put("/release-request/:request_id", async (req, res) => {
+  try {
+    const { request_id } = req.params
+    console.log("Request ID: ", request_id)
+    
+    // Use the same improved query
+    const [findRequest] = await pool.query(
+      `SELECT r.*, u.phone, u.username,
+       GROUP_CONCAT(dt.name SEPARATOR ', ') as document_name
+       FROM requests r
+       JOIN user u ON r.student_id = u.uid
+       LEFT JOIN request_documents rd ON r.request_id = rd.request_id
+       LEFT JOIN document_types dt ON rd.document_id = dt.document_id
+       WHERE r.request_id = ?
+       GROUP BY r.request_id`,
+      [request_id]
+    )
+    
+    if (findRequest.length === 0) return res.status(400).json({ message: "Request doesn't exist" })
+    
+    const request = findRequest[0]
+    
+    if (request.status !== "completed") {
+      return res.status(401).json({ message: "Request must be completed before it can be released." })
+    }
+    
+    const [result] = await pool.query(
+      "UPDATE requests SET status = 'released', released_at = NOW() WHERE request_id = ?",
+      [request_id]
+    )
+    
+    if (result.affectedRows === 0) {
+      return res.status(402).json({ message: "Failed to update request" })
+    }
+    
+    const currentDate = new Date().toISOString().slice(0, 10)
+    
+    if (request.phone && request.document_name) {
+      const smsMessage = `Hi ${request.username}, your document "${request.document_name}" (Request #${request_id}) has been released and handed over to you on ${currentDate}. Thank you for using BHC Document Request System!`
+      
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed: ", err)
+      })
+      console.log(`✅ Document released SMS sent to ${request.phone}`)
+    }
+    
+    res.status(200).json({
+      message: "Request marked as released.",
+      request_id: request_id,
+      releaseDate: currentDate,
+      smsSent: !!(request.phone && request.document_name)
+    })
+  } catch (error) {
+    console.error("Error releasing request:", error)
+    res.status(500).json({ 
+      message: "Failed to mark request as released",
       details: error.message 
     })
   }
