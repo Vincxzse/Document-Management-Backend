@@ -247,16 +247,24 @@ router.put("/approve-payment/:request_id", async (req, res) => {
     if (requestData.length === 0) {
       return res.status(404).json({ message: "Request not found" })
     }
+
     const request = requestData[0]
-    const [result] = await pool.query(
+
+    // Update parent request
+    await pool.query(
       `UPDATE requests SET payment = 'approved', status = 'in progress' 
        WHERE request_id = ?`,
       [request_id]
     )
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Request not found" })
-    }
+    // Update all child requests if this is a parent
+    await pool.query(
+      `UPDATE requests SET payment = 'approved', status = 'in progress' 
+       WHERE parent_request_id = ?`,
+      [request_id]
+    )
+
+    // Send SMS notification
     if (request.phone) {
       const smsMessage = `Hi ${request.username}, your payment for request #${request_id} has been approved by BHC Cashier. Your clearance process can now proceed.`
       await sendSMS(request.phone, smsMessage).catch(err => {
@@ -277,6 +285,7 @@ router.put("/approve-payment/:request_id", async (req, res) => {
     })
   }
 })
+
 router.put("/reject-payment/:request_id", async (req, res) => {
   try {
     const { request_id } = req.params
@@ -285,6 +294,7 @@ router.put("/reject-payment/:request_id", async (req, res) => {
     if (!reason || !reason.trim()) {
       return res.status(400).json({ message: "Rejection reason is required" })
     }
+
     const [requestData] = await pool.query(
       `SELECT r.*, u.phone, u.username 
        FROM requests r 
@@ -298,16 +308,24 @@ router.put("/reject-payment/:request_id", async (req, res) => {
     }
 
     const request = requestData[0]
-    const [result] = await pool.query(
+
+    // Update parent request
+    await pool.query(
       `UPDATE requests 
        SET payment = 'rejected', rejection_reason = ?
        WHERE request_id = ?`,
-      [reason || null, request_id]
+      [reason, request_id]
     )
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Request not found" })
-    }
+    // Update all child requests
+    await pool.query(
+      `UPDATE requests 
+       SET payment = 'rejected', rejection_reason = ?
+       WHERE parent_request_id = ?`,
+      [reason, request_id]
+    )
+
+    // Send SMS notification
     if (request.phone) {
       const smsMessage = `Hi ${request.username}, your payment for request #${request_id} was rejected. Reason: ${reason}. Please contact BHC Cashier for assistance.`
       await sendSMS(request.phone, smsMessage).catch(err => {
@@ -316,7 +334,7 @@ router.put("/reject-payment/:request_id", async (req, res) => {
     }
 
     res.json({ 
-      message: "Payment rejected",
+      message: "Payment rejected for all documents",
       smsSent: !!request.phone 
     })
 
@@ -788,7 +806,7 @@ router.put("/request-status/:id", async (req, res) => {
 
   try {
     const [requestData] = await pool.query(
-      `SELECT r.*, u.phone, u.username, d.name as document_name, d.processing_time
+      `SELECT r.*, u.phone, u.username, d.name as document_name
        FROM requests r 
        JOIN user u ON r.student_id = u.uid 
        LEFT JOIN document_types d ON r.document_id = d.document_id
@@ -802,50 +820,32 @@ router.put("/request-status/:id", async (req, res) => {
 
     const request = requestData[0]
 
+    // Update parent request
     await pool.query("UPDATE requests SET status = ? WHERE request_id = ?", [status, id])
 
-    if (request.phone) {
-      let smsMessage = ""
+    // Update all child requests with the same status
+    await pool.query(
+      "UPDATE requests SET status = ? WHERE parent_request_id = ?",
+      [status, id]
+    )
+
+    // Send SMS for approval
+    if (request.phone && status.toLowerCase() === "approved") {
+      const [allDocs] = await pool.query(
+        `SELECT GROUP_CONCAT(d.name SEPARATOR ', ') as all_docs
+         FROM request_documents rd
+         JOIN document_types d ON rd.document_id = d.document_id
+         WHERE rd.request_id = ?`,
+        [id]
+      )
+
+      const documentList = allDocs[0]?.all_docs || request.document_name
+
+      const smsMessage = `Hi ${request.username}, good news! Your request #${id} for "${documentList}" has been approved and is now being processed.`
       
-      if (status.toLowerCase() === "approved") {
-        const processingTimes = {
-          "good moral certificate": 3,
-          "certificate of registration": 2,
-          "certificate of grades": 2,
-          "transcript of records": 7,
-          "form 137 (school records)": 5,
-          "diploma": 15,
-          "certification of graduation": 4,
-          "honorable dismissal": 3,
-        }
-
-        const docNameLower = (request.document_name || "").toLowerCase()
-        const daysToAdd = processingTimes[docNameLower] || 3
-        let businessDays = 0
-        let readyDate = new Date()
-        
-        while (businessDays < daysToAdd) {
-          readyDate.setDate(readyDate.getDate() + 1)
-          const dayOfWeek = readyDate.getDay()
-          if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-            businessDays++
-          }
-        }
-        
-        const readyDateFormatted = readyDate.toLocaleDateString('en-US', {
-          month: '2-digit',
-          day: '2-digit',
-          year: 'numeric'
-        })
-
-        smsMessage = `Hi ${request.username}, good news! Your request for "${request.document_name}" (Request #${id}) has been approved and is now being processed. Expected ready date: ${readyDateFormatted}. You'll receive another notification when it's ready for pickup at BHC Registrar's Office.`
-      }
-
-      if (smsMessage) {
-        await sendSMS(request.phone, smsMessage).catch(err => {
-          console.error("SMS sending failed:", err)
-        })
-      }
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err)
+      })
     }
 
     res.json({ 
@@ -855,6 +855,154 @@ router.put("/request-status/:id", async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Failed to create the action" })
+  }
+})
+
+router.put("/complete-individual-request/:request_id", async (req, res) => {
+  try {
+    const { request_id } = req.params
+    
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username, d.name as document_name
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       LEFT JOIN document_types d ON r.document_id = d.document_id
+       WHERE r.request_id = ? AND r.parent_request_id IS NOT NULL`,
+      [request_id]
+    )
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ message: "Child request not found" })
+    }
+
+    const request = requestData[0]
+
+    // Update only this specific request
+    await pool.query(
+      "UPDATE requests SET status = 'completed', completed_at = NOW() WHERE request_id = ?",
+      [request_id]
+    )
+
+    // Send SMS for this specific document
+    if (request.phone) {
+      const pickupDate = new Date().toLocaleDateString('en-US', {
+        month: '2-digit',
+        day: '2-digit',
+        year: 'numeric'
+      })
+
+      const smsMessage = `Congratulations ${request.username}! Your requested document "${request.document_name}" (Request #${request_id}) is now ready for pickup at BHC Registrar's Office on ${pickupDate}. Please bring a valid ID.`
+      
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err)
+      })
+    }
+
+    res.json({ 
+      message: "Document marked as completed",
+      requestId: request_id,
+      smsSent: !!request.phone
+    })
+
+  } catch (error) {
+    console.error("Error completing individual request:", error)
+    res.status(500).json({ 
+      message: "Failed to mark document as completed",
+      details: error.message 
+    })
+  }
+})
+
+router.put("/release-individual-request/:request_id", async (req, res) => {
+  try {
+    const { request_id } = req.params
+    
+    const [requestData] = await pool.query(
+      `SELECT r.*, u.phone, u.username, d.name as document_name
+       FROM requests r 
+       JOIN user u ON r.student_id = u.uid 
+       LEFT JOIN document_types d ON r.document_id = d.document_id
+       WHERE r.request_id = ? AND r.parent_request_id IS NOT NULL`,
+      [request_id]
+    )
+
+    if (requestData.length === 0) {
+      return res.status(404).json({ message: "Child request not found" })
+    }
+
+    const request = requestData[0]
+
+    if (request.status !== "completed") {
+      return res.status(400).json({ 
+        message: "Document must be completed before it can be released." 
+      })
+    }
+
+    // Update only this specific request
+    await pool.query(
+      "UPDATE requests SET status = 'released', released_at = NOW() WHERE request_id = ?",
+      [request_id]
+    )
+
+    // Send SMS for this specific document
+    if (request.phone) {
+      const currentDate = new Date().toISOString().slice(0, 10)
+
+      const smsMessage = `Hi ${request.username}, your document "${request.document_name}" (Request #${request_id}) has been released and handed over to you on ${currentDate}. Thank you for using BHC Document Request System!`
+      
+      await sendSMS(request.phone, smsMessage).catch(err => {
+        console.error("SMS sending failed:", err)
+      })
+    }
+
+    res.json({
+      message: "Document released successfully",
+      request_id: request_id,
+      smsSent: !!request.phone
+    })
+
+  } catch (error) {
+    console.error("Error releasing individual request:", error)
+    res.status(500).json({ 
+      message: "Failed to release document",
+      details: error.message 
+    })
+  }
+})
+
+router.get("/get-child-requests/:parent_id", async (req, res) => {
+  try {
+    const { parent_id } = req.params
+
+    const [requests] = await pool.query(
+      `SELECT 
+        r.request_id,
+        r.student_id,
+        r.document_id,
+        r.status,
+        r.payment,
+        r.completed_at,
+        r.released_at,
+        r.amount,
+        r.reason,
+        DATE_FORMAT(r.submission_date, '%Y-%m-%d') AS submission_date,
+        DATE_FORMAT(r.release_date, '%Y-%m-%d') AS release_date,
+        d.name AS document_name
+      FROM requests r
+      LEFT JOIN document_types d ON r.document_id = d.document_id
+      WHERE r.parent_request_id = ?
+      ORDER BY r.request_id ASC`,
+      [parent_id]
+    )
+
+    res.json({ requests })
+
+  } catch (error) {
+    console.error("Error fetching child requests:", error)
+    res.status(500).json({
+      message: "Failed to fetch child requests",
+      details: error.message
+    })
   }
 })
 
@@ -1748,6 +1896,150 @@ router.put("/release-request/:request_id", async (req, res) => {
     res.status(500).json({ 
       message: "Failed to mark request as released",
       details: error.message 
+    })
+  }
+})
+
+// Add this new route for grouped checkout
+router.post("/checkout-grouped", async (req, res) => {
+  try {
+    const { user_id, items } = req.body
+
+    if (!user_id || !items || items.length === 0) {
+      return res.status(400).json({ message: "Invalid checkout data" })
+    }
+
+    // Calculate total amount and get all document details
+    let totalAmount = 0
+    const documentDetails = []
+    
+    for (const item of items) {
+      const documentId = item.document_id || item.doc_id
+      
+      const [documents] = await pool.query(
+        "SELECT document_id, fee, name, processing_time FROM document_types WHERE document_id = ?",
+        [documentId]
+      )
+
+      if (documents.length === 0) {
+        console.error(`Document ${documentId} not found`)
+        continue
+      }
+
+      const doc = documents[0]
+      totalAmount += parseFloat(doc.fee || 0)
+      documentDetails.push({
+        document_id: documentId,
+        name: doc.name,
+        fee: doc.fee,
+        processing_time: doc.processing_time,
+        reason: item.reason
+      })
+    }
+
+    // Find the longest processing time for the release date
+    let maxDaysToAdd = 0
+    documentDetails.forEach(doc => {
+      const match = doc.processing_time && doc.processing_time.match(/\d+/)
+      if (match) {
+        const days = parseInt(match[0], 10)
+        if (days > maxDaysToAdd) maxDaysToAdd = days
+      }
+    })
+
+    const submissionDate = new Date()
+    const releaseDate = new Date(submissionDate)
+    releaseDate.setDate(submissionDate.getDate() + maxDaysToAdd)
+    const formattedReleaseDate = releaseDate.toISOString().split("T")[0]
+
+    // Create parent request with grouped document info
+    const documentIds = documentDetails.map(d => d.document_id)
+    const documentNames = documentDetails.map(d => d.name).join(', ')
+    const reasons = documentDetails.map(d => d.reason || 'No reason provided').join(' | ')
+
+    const [parentResult] = await pool.query(
+      `INSERT INTO requests 
+       (student_id, document_id, submission_date, release_date, status, payment, reason, amount, document_ids) 
+       VALUES (?, ?, NOW(), ?, 'Pending', 'pending', ?, ?, ?)`,
+      [
+        user_id,
+        documentIds[0], // Primary document for compatibility
+        formattedReleaseDate,
+        reasons,
+        totalAmount.toFixed(2),
+        JSON.stringify(documentIds)
+      ]
+    )
+
+    const parentRequestId = parentResult.insertId
+
+    // Create individual request entries linked to parent
+    const childRequests = []
+    for (const doc of documentDetails) {
+      const [childResult] = await pool.query(
+        `INSERT INTO requests 
+         (student_id, document_id, submission_date, release_date, status, payment, reason, amount, parent_request_id) 
+         VALUES (?, ?, NOW(), ?, 'Pending', 'pending', ?, ?, ?)`,
+        [
+          user_id,
+          doc.document_id,
+          formattedReleaseDate,
+          doc.reason || 'No reason provided',
+          parseFloat(doc.fee).toFixed(2),
+          parentRequestId
+        ]
+      )
+
+      const childRequestId = childResult.insertId
+      childRequests.push(childRequestId)
+
+      // Insert into request_documents
+      await pool.query(
+        "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
+        [childRequestId, doc.document_id]
+      )
+
+      // Create clearance row for each child
+      await pool.query(
+        "INSERT INTO request_clearances (request_id) VALUES (?)",
+        [childRequestId]
+      )
+    }
+
+    // Also create entries for parent request
+    for (const docId of documentIds) {
+      await pool.query(
+        "INSERT INTO request_documents (request_id, document_id) VALUES (?, ?)",
+        [parentRequestId, docId]
+      )
+    }
+
+    await pool.query(
+      "INSERT INTO request_clearances (request_id) VALUES (?)",
+      [parentRequestId]
+    )
+
+    // Remove items from cart
+    const itemIds = items.map(item => item.item_id)
+    await pool.query(
+      "DELETE FROM document_cart WHERE user_id = ? AND item_id IN (?)",
+      [user_id, itemIds]
+    )
+
+    res.json({
+      message: "Grouped request created successfully!",
+      parent_request_id: parentRequestId,
+      child_requests: childRequests,
+      document_count: documentDetails.length,
+      total_amount: totalAmount.toFixed(2),
+      document_names: documentNames
+    })
+
+  } catch (error) {
+    console.error("Grouped checkout error:", error)
+    res.status(500).json({
+      message: "Checkout failed",
+      details: error.message
     })
   }
 })
